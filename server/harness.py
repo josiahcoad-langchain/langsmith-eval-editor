@@ -2,14 +2,21 @@
 
 Each test (dataset example) is Given / When / Then:
   inputs.mock_tools, inputs.recorded_on   Given: every tool response the run may see (see mocks.py)
+  inputs.history                          Given: prior turns [{role, content}] sent before the prompt
+  inputs.context                          Given: opaque JSON the hook uses to set the agent up (its own keys)
   inputs.prompt                           When: the message sent to the agent
   outputs.assertions                      Then: [{name, assertion}], one-sentence statements about the run
+  outputs.checks                          Then: [{name, type, ...}], code checks a judge can't grade (checks.py)
+
+The hook returns the replayed history first, then this turn's messages. Grading and code checks look only at
+this turn, so replayed history never counts as the agent's own work.
   metadata.name, metadata.description     what the test is
 
 A test runs `repetitions` times in parallel as one experiment, because an agent that passes once can still be
-flaky. Every run gets two kinds of feedback:
+flaky. Every run gets three kinds of feedback:
   all-tools-mocked   0 if the agent called a tool the test doesn't mock (the run touched something unpinned)
   <assertion name>   1 / 0 per assertion, graded together in one LLM call against the transcript
+  <check name>       1 / 0 per code check, graded in code (None for an unknown type, never a silent pass)
 
     uv run python harness.py                       # every test, 3 repetitions
     uv run python harness.py refund-damaged -r 1   # by name
@@ -24,14 +31,17 @@ from concurrent.futures import ThreadPoolExecutor
 
 from dotenv import load_dotenv
 from langchain.chat_models import init_chat_model
-from langchain_core.messages import AIMessage, BaseMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langsmith import Client, evaluate
 from pydantic import BaseModel
 
 load_dotenv()
 
-import hook  # noqa: E402  (after load_dotenv: the agent reads its model settings at import)
+from agent_hook import load_hook  # noqa: E402
+from checks import run_checks  # noqa: E402
 from mocks import MockTools  # noqa: E402
+
+hook = load_hook()  # after load_dotenv: the agent reads its model settings at import
 
 DATASET_NAME = os.environ.get("EVAL_DATASET", "eval-editor-demo")
 JUDGE_MODEL = os.environ.get("JUDGE_MODEL", "anthropic:claude-sonnet-5-5")
@@ -48,13 +58,51 @@ def _transcript(messages: list[BaseMessage]) -> list[dict]:
     return rows
 
 
+def _model_calls(messages: list[BaseMessage]) -> list[dict]:
+    """Token usage per model call, for code checks like max_prompt_tokens. A judge can't see these numbers."""
+    calls = []
+    for message in messages:
+        if not isinstance(message, AIMessage) or message.usage_metadata is None:
+            continue
+        usage = message.usage_metadata
+        calls.append({"input_tokens": usage.get("input_tokens"), "output_tokens": usage.get("output_tokens"),
+                      "tool_calls": len(message.tool_calls)})
+    return calls
+
+
+def _this_turn(messages: list[BaseMessage], inputs: dict) -> list[BaseMessage]:
+    """The messages from the prompt on. Replayed history must not count as the agent's own work.
+
+    Found by the prompt's own message rather than by counting history: an agent that summarizes a long thread
+    returns fewer messages than it was given, and a count would then cut into this turn.
+    """
+    prompt = inputs["prompt"].strip()
+    for index in range(len(messages) - 1, -1, -1):
+        if isinstance(messages[index], HumanMessage) and messages[index].text.strip() == prompt:
+            return messages[index:]
+    return messages[len(inputs.get("history") or []):]
+
+
+def _run_agent(inputs: dict, mocks: MockTools) -> list[BaseMessage]:
+    # Pass history and context only when the test has them, so hooks written before they existed still work.
+    extra = {key: inputs[key] for key in ("history", "context") if inputs.get(key)}
+    return hook.run_agent(inputs["prompt"], mocks, **extra)
+
+
 def target(inputs: dict) -> dict:
     """One run of one test: the agent answers the prompt with every tool call served from the test's mocks."""
     mocks = MockTools(inputs.get("mock_tools"), inputs.get("recorded_on"))
-    messages = hook.run_agent(inputs["prompt"], mocks)
-    answer = next((m.text for m in reversed(messages) if isinstance(m, AIMessage) and m.text), "")
+    messages = _run_agent(inputs, mocks)
+    turn = _this_turn(messages, inputs)
+    answer = next((m.text for m in reversed(turn) if isinstance(m, AIMessage) and m.text), "")
     return {"answer": answer, "tool_calls": mocks.calls, "unmocked_calls": mocks.unmocked,
-            "transcript": _transcript(messages)}
+            "model_calls": _model_calls(turn), "transcript": _transcript(turn)}
+
+
+def code_checks(outputs: dict, reference_outputs: dict) -> dict:
+    """Grades `outputs.checks` in code; each check becomes its own feedback key (see checks.py)."""
+    checks = reference_outputs.get("checks") or []
+    return {"results": run_checks(outputs, checks, custom=getattr(hook, "custom_check", None))}
 
 
 def all_tools_mocked(outputs: dict) -> dict:
@@ -90,6 +138,12 @@ that cites the evidence.
 </evidence>"""
 
 
+def _judge():
+    # A hook may supply its own judge, e.g. to bill grading to the same test key its agent runs on.
+    judge_model = getattr(hook, "judge_model", None)
+    return judge_model() if judge_model else init_chat_model(JUDGE_MODEL)
+
+
 def assertions(outputs: dict, reference_outputs: dict) -> dict:
     """Grades every assertion in one call; each becomes its own feedback key."""
     tests = [t for t in reference_outputs.get("assertions") or [] if t.get("name")]
@@ -98,7 +152,7 @@ def assertions(outputs: dict, reference_outputs: dict) -> dict:
     evidence = {k: outputs.get(k) for k in ("answer", "tool_calls", "transcript")}
     prompt = JUDGE_PROMPT.format(assertions=json.dumps(tests, indent=2),
                                  evidence=json.dumps(evidence, indent=2, default=str)[:EVIDENCE_LIMIT])
-    judge = init_chat_model(JUDGE_MODEL).with_structured_output(Grades, method="json_schema")
+    judge = _judge().with_structured_output(Grades, method="json_schema")
     by_name = {g.name: g for g in judge.invoke(prompt).grades}
     return {"results": [
         {"key": t["name"], "score": int(by_name[t["name"]].passed) if t["name"] in by_name else None,
@@ -113,7 +167,7 @@ def test_name(example) -> str:
 def run_test(example, repetitions: int = 3, client: Client | None = None) -> str:
     """Runs one test `repetitions` times as one experiment and returns the experiment's name."""
     name = test_name(example)
-    results = evaluate(target, data=[example], evaluators=[all_tools_mocked, assertions], client=client,
+    results = evaluate(target, data=[example], evaluators=[all_tools_mocked, assertions, code_checks], client=client,
                        num_repetitions=repetitions, max_concurrency=repetitions, experiment_prefix=name,
                        metadata={"test": name, "example_id": str(example.id), "repetitions": repetitions})
     return results.experiment_name
