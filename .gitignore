@@ -1,0 +1,9 @@
+.DS_Store
+.env
+.venv/
+__pycache__/
+.pytest_cache/
+node_modules/
+app/dist/
+app/dist-web/
+server/.run-queue-state.json

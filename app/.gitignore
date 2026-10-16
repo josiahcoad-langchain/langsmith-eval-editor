@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.DS_Store
+.env
+.env.*
+*.crt
+*.key
+*.pem
+credentials.json
+.gstack/
+dist-web/
+!.env.example

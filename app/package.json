@@ -1,0 +1,36 @@
+{
+  "name": "eval-editor",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev:web": "vite --mode web",
+    "build:web": "vite build --mode web",
+    "dev": "langsmith apps dev",
+    "build": "vite build",
+    "watch": "vite build --watch",
+    "typecheck": "tsc --noEmit",
+    "macaw": "macaw"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "dependencies": {
+    "@langchain/macaw-components": "^1.0.0-beta.9",
+    "@langchain/macaw-tokens": "^1.0.0-beta.9",
+    "@phosphor-icons/react": "^2.1.10",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
+  },
+  "devDependencies": {
+    "@langchain/macaw-cli": "^1.0.0-beta.9",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "@vitejs/plugin-react": "^5.1.4",
+    "autoprefixer": "^10.4.19",
+    "postcss": "^8.4.39",
+    "tailwindcss": "^3.4.4",
+    "typescript": "^5.5.3",
+    "vite": "^8.1.2"
+  }
+}
