@@ -39,6 +39,7 @@ load_dotenv()
 
 from agent_hook import load_hook  # noqa: E402
 from checks import run_checks  # noqa: E402
+from content_hash import content_hash  # noqa: E402
 from evidence import build_evidence  # noqa: E402
 from mocks import MockTools  # noqa: E402
 from suite import Repetition  # noqa: E402
@@ -217,7 +218,9 @@ def _evaluate(example, repetitions: int, client: Client | None):
     name = test_name(example)
     return evaluate(target, data=[example], evaluators=[assertions, code_checks], client=client,
                     num_repetitions=repetitions, max_concurrency=repetitions, experiment_prefix=name,
-                    metadata={"test": name, "example_id": str(example.id), "repetitions": repetitions})
+                    # test_hash: what the test asked when it ran, so the editor can tell when it has changed since.
+                    metadata={"test": name, "example_id": str(example.id), "repetitions": repetitions,
+                              "test_hash": content_hash(example.inputs or {}, example.outputs or {})})
 
 
 def run_tests(example_ids: list[str] | None = None, names: list[str] | None = None, repetitions: int = 3) -> list[str]:

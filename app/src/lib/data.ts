@@ -453,8 +453,9 @@ export type KeyResult = { passed: number; n: number };
 export type TestSummary = {
   status: TestStatus; costPerRun: number | null; keys: Record<string, KeyResult>; ranAt: string;
   runs: number; totalCost: number | null; latencyP50: number | null;
-  // The test version the run used (the dataset's version when it started) and the agent commit it ran on.
-  testVersion: string; agentCommit: string;
+  // What the test asked when it ran (content hash; '' for runs from before it was recorded), the dataset's
+  // version then, and the agent commit it ran on.
+  testHash: string; testVersion: string; agentCommit: string;
 };
 
 function summaryOf(experiment: Json): TestSummary {
@@ -476,6 +477,7 @@ function summaryOf(experiment: Json): TestSummary {
     runs: runs ?? 0,
     totalCost: cost,
     latencyP50: typeof experiment.latency_p50 === 'number' ? experiment.latency_p50 : null,
+    testHash: text(metadata.test_hash),
     testVersion: text(metadata.dataset_version) || text(experiment.start_time),
     agentCommit: text(git.commit),
   };
@@ -525,22 +527,21 @@ export async function fetchStatuses(
   }
   // Every test not found on any page has never run.
   const never: TestSummary = {
-    status: 'none', costPerRun: null, keys: {}, ranAt: '', runs: 0, totalCost: null, latencyP50: null, testVersion: '', agentCommit: '',
+    status: 'none', costPerRun: null, keys: {}, ranAt: '', runs: 0, totalCost: null, latencyP50: null, testHash: '', testVersion: '', agentCommit: '',
   };
   return { ...Object.fromEntries([...wanted].map((id) => [id, never])), ...statuses() };
 }
 
 const STATUS_PAGE = 100;
 
-// Why a test's newest result no longer describes it, or null if it still does. A result is out of date when the
-// test was edited after the run (its Given, prompt or assertions are not what was graded), or when the agent's
-// code moved on (web mode knows the current commit; a run records its own).
-export function staleness(summary: TestSummary | undefined, example: Example | undefined, agentCommit?: string): string | null {
-  if (!summary || summary.status === 'none' || !example) return null;
-  const edited = Date.parse(example.modifiedAt ?? '');
-  const ran = Date.parse(summary.testVersion);
-  // A second of slack: the version a run records and the example's own timestamp come from different clocks.
-  if (edited && ran && edited > ran + 1000) return 'the test was edited after this run';
+// Why a test's newest result no longer describes it, or null if it still does. Out of date when what the test
+// asks changed after the run (its content hash differs from the one the run recorded: metadata such as tags or a
+// description does not count), or when the agent's code moved on (web mode knows the current commit; a run
+// records its own). `currentHash` is the test's hash now (contentHash.ts); undefined while it is computed.
+export function staleness(summary: TestSummary | undefined, currentHash: string | undefined, agentCommit?: string): string | null {
+  if (!summary || summary.status === 'none') return null;
+  // Runs from before hashes were recorded can't be compared; saying "out of date" for them would be a guess.
+  if (summary.testHash && currentHash && summary.testHash !== currentHash) return 'the test was edited after this run';
   if (agentCommit && summary.agentCommit && !summary.agentCommit.startsWith(agentCommit.slice(0, 7))) {
     return `the agent's code changed since this run (${summary.agentCommit.slice(0, 8)} → ${agentCommit.slice(0, 8)})`;
   }

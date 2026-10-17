@@ -6,6 +6,7 @@ import { Text } from '@langchain/macaw-components/Text';
 import { DATASET_NAME } from './config';
 import { fieldClass, RemoveButton, Section, Subsection, TextAreaField, TextField } from './components/fields';
 import { ActionsMenu } from './components/ActionsMenu';
+import { contentHash } from './lib/contentHash';
 import { AssertionDrilldown } from './components/AssertionDrilldown';
 import { LastRun } from './components/LastRun';
 import { ResultChip } from './components/ResultChip';
@@ -72,6 +73,8 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
   const [dataset, setDataset] = useState<Dataset | null>(null);
   const [examples, setExamples] = useState<Example[]>([]);
   const [summaries, setSummaries] = useState<Record<string, TestSummary>>({});
+  // Each test's content hash as it is now (contentHash.ts), compared with the one its newest run recorded.
+  const [hashes, setHashes] = useState<Record<string, string>>({});
   // Runs queued or in progress on the server, by example id (web mode), and a counter that re-reads the dots.
   const [activeRuns, setActiveRuns] = useState<Record<string, 'queued' | 'running'>>({});
   const [statusTick, setStatusTick] = useState(0);
@@ -102,6 +105,14 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
     const timer = window.setInterval(() => void refresh(), 30000);
     return () => { cancelled = true; window.clearInterval(timer); };
   }, [dataset, exampleIds, statusTick]);
+
+  useEffect(() => {
+    let cancelled = false;
+    Promise.all(examples.filter((e) => !e.isNew).map(async (e) => [e.id, await contentHash(e.inputs, e.outputs)] as const))
+      .then((pairs) => { if (!cancelled) setHashes(Object.fromEntries(pairs)); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [examples]);
 
   useEffect(() => setDrill(null), [selectedId]);
 
@@ -317,7 +328,7 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
 
   const savedExamples = examples.filter((e) => !e.isNew);
   const selectedStale = selected && !selected.isNew
-    ? (dirty ? 'the test has unsaved edits' : staleness(summaries[selected.id], selected, metadata?.agentCommit))
+    ? (dirty ? 'the test has unsaved edits' : staleness(summaries[selected.id], hashes[selected.id], metadata?.agentCommit))
     : null;
   const failingExamples = savedExamples.filter((e) => ['fail', 'flaky', 'error'].includes(summaries[e.id]?.status ?? ''));
   const batchFor = (which: 'all' | 'failing') => (which === 'all' ? savedExamples : failingExamples);
@@ -459,7 +470,7 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
               subtitle={exampleDraft?.description || `${count} assertions`}
               badge={example.isNew ? 'new' : dirtyIds.has(example.id) ? '● unsaved' : `${count} asserts`}
               status={example.isNew ? undefined : activeRuns[example.id] ?? summaries[example.id]?.status}
-              stale={!activeRuns[example.id] && staleness(summaries[example.id], example, metadata?.agentCommit) !== null}
+              stale={!activeRuns[example.id] && staleness(summaries[example.id], hashes[example.id], metadata?.agentCommit) !== null}
               onClick={() => select(example.id)}
             />
           );
@@ -507,7 +518,7 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
                   </Text>
                   {!selected.isNew ? (
                     <LastRun summary={summaries[selected.id]} error={lastError} onOpen={() => setShowResults(true)}
-                      stale={dirty ? 'the test has unsaved edits' : staleness(summaries[selected.id], selected, metadata?.agentCommit)} />
+                      stale={dirty ? 'the test has unsaved edits' : staleness(summaries[selected.id], hashes[selected.id], metadata?.agentCommit)} />
                   ) : null}
                 </div>
                 <div className="flex flex-wrap gap-space-2">
