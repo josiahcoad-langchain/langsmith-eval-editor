@@ -469,7 +469,7 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
               title={exampleDraft?.name || 'Untitled test'}
               subtitle={exampleDraft?.description || `${count} assertions`}
               badge={example.isNew ? 'new' : dirtyIds.has(example.id) ? '● unsaved' : `${count} asserts`}
-              status={example.isNew ? undefined : activeRuns[example.id] ?? summaries[example.id]?.status}
+              status={example.isNew ? undefined : activeRuns[example.id] ?? (summaries[example.id]?.runningElsewhere ? 'running' : summaries[example.id]?.status)}
               stale={!activeRuns[example.id] && staleness(summaries[example.id], hashes[example.id], metadata?.agentCommit, metadata?.sameAgentCommits) !== null}
               onClick={() => select(example.id)}
             />

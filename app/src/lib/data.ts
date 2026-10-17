@@ -1,6 +1,7 @@
 // Everything the editor reads and writes in LangSmith. Every call goes through window.langsmith.call: inside
 // LangSmith that is the custom-app bridge, and in the web build it's a shim over the server's proxy (src/web.tsx).
 import { DATASET_NAME, TRACE_PROJECT } from '../config';
+import { isResult, isRunning, statsFromRuns } from './experimentState';
 
 export type Json = Record<string, unknown>;
 
@@ -482,6 +483,8 @@ export type TestSummary = {
   // What the test asked when it ran (content hash; '' for runs from before it was recorded), the dataset's
   // version then, and the agent commit it ran on.
   testHash: string; testVersion: string; agentCommit: string;
+  // A run of this test started somewhere (CLI, CI, another editor) and has no grades yet.
+  runningElsewhere?: boolean;
 };
 
 function summaryOf(experiment: Json): TestSummary {
@@ -533,7 +536,15 @@ export async function fetchStatuses(
 ): Promise<Record<string, TestSummary>> {
   const wanted = new Set(exampleIds);
   const newest: Record<string, Json> = {};
-  const statuses = () => Object.fromEntries(Object.entries(newest).map(([id, experiment]) => [id, summaryOf(experiment)]));
+  // Each test's newest experiment that is newer than its result and lists no grades.
+  const ungraded: Record<string, Json> = {};
+  // Tests whose such experiment really has no grades yet: being run right now, from anywhere.
+  const running = new Set<string>();
+  const now = Date.now();
+  const statuses = () => Object.fromEntries([...new Set([...Object.keys(newest), ...running])].map((id) => [id, {
+    ...(newest[id] ? summaryOf(newest[id]) : never()),
+    runningElsewhere: running.has(id) && !(id in newest),
+  }]));
   for (let offset = 0; ; offset += STATUS_PAGE) {
     const page = await callLangSmith<unknown>('GET /api/v1/sessions', {
       params: {
@@ -544,18 +555,53 @@ export async function fetchStatuses(
     const experiments = (Array.isArray(page) ? page : []).filter(isRecord);
     for (const experiment of experiments) {
       const exampleId = experimentExampleId(experiment);
-      // Newest first, so the first experiment seen for a test is its newest.
-      if (exampleId && !(exampleId in newest)) newest[exampleId] = experiment;
+      if (!exampleId || exampleId in newest) continue;
+      // Newest first, so the first RESULT seen for a test is its newest. One whose list entry shows no grades isn't
+      // one yet (it would read as "never run" and hide the real result behind it), but it may only be lagging:
+      // its newest such experiment is checked against its runs below.
+      if (isResult(experiment)) newest[exampleId] = experiment;
+      else ungraded[exampleId] ??= experiment;
     }
     onPage(statuses());
     const allFound = [...wanted].every((id) => id in newest);
     if (allFound || experiments.length < STATUS_PAGE) break;
   }
+  await gradeFromRuns(datasetId, ungraded);
+  for (const [exampleId, experiment] of Object.entries(ungraded)) {
+    // Newer than any result found for the test, so once its runs show grades it IS the newest result.
+    if (isResult(experiment)) newest[exampleId] = experiment;
+    else if (isRunning(experiment, now)) running.add(exampleId);
+  }
   // Every test not found on any page has never run.
-  const never: TestSummary = {
+  return { ...Object.fromEntries([...wanted].map((id) => [id, never()])), ...statuses() };
+}
+
+// Fills in each experiment's feedback_stats and error_rate from its runs, in place: one request per 50 tests, and
+// only for experiments whose list entry showed no grades (usually none, a few while something is running).
+async function gradeFromRuns(datasetId: string, experiments: Record<string, Json>): Promise<void> {
+  const entries = Object.entries(experiments);
+  for (let i = 0; i < entries.length; i += 50) {
+    const batch = entries.slice(i, i + 50);
+    const page = await callLangSmith<unknown>(`POST /api/v2/datasets/${datasetId}/experiment-runs`, {
+      body: {
+        experiment_ids: batch.map(([, e]) => text(e.id)),
+        example_ids: batch.map(([id]) => id),
+        page_size: 50,
+        selects: ['ID', 'PROJECT_ID', 'STATUS', 'ERROR', 'FEEDBACK_STATS'],
+      },
+    });
+    const items = isRecord(page) && Array.isArray(page.items) ? page.items.filter(isRecord) : [];
+    const runs = items.flatMap((item) => (Array.isArray(item.runs) ? item.runs.filter(isRecord) : []));
+    for (const [, experiment] of batch) {
+      Object.assign(experiment, statsFromRuns(runs.filter((run) => text(run.project_id) === text(experiment.id))));
+    }
+  }
+}
+
+function never(): TestSummary {
+  return {
     status: 'none', costPerRun: null, keys: {}, ranAt: '', runs: 0, totalCost: null, latencyP50: null, testHash: '', testVersion: '', agentCommit: '',
   };
-  return { ...Object.fromEntries([...wanted].map((id) => [id, never])), ...statuses() };
 }
 
 const STATUS_PAGE = 100;

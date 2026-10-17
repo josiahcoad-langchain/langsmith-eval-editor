@@ -10,7 +10,10 @@ export function LastRun({ summary, stale, error = '', onOpen, onRun }: {
   const run = (label: string) => onRun
     ? <button type="button" className="font-medium text-brand-primary underline-offset-2 hover:underline" onClick={onRun}>{label}</button>
     : null;
-  if (summary.status === 'none') return <span className="text-xs text-tertiary">Never run. {run('Run now')}</span>;
+  const elsewhere = summary.runningElsewhere
+    ? <span className="text-xs text-brand-primary">Running now (started outside this editor); results land when it's graded.</span>
+    : null;
+  if (summary.status === 'none') return elsewhere ?? <span className="text-xs text-tertiary">Never run. {run('Run now')}</span>;
   const keys = Object.values(summary.keys);
   const allPassed = keys.filter((k) => k.passed === k.n).length;
   const verdict = summary.status === 'error'
@@ -30,6 +33,7 @@ export function LastRun({ summary, stale, error = '', onOpen, onRun }: {
         {': '}<span className={stale ? '' : tone}>{verdict}</span>{' · '}{parts.join(' · ')}
       </span>
       {summary.status === 'error' && error ? <span className="text-error-primary">Why: {error}</span> : null}
+      {elsewhere}
       {stale ? <span className="text-warning-primary">Out of date: {stale}. {run('Run it again') ?? 'Run it again'} to refresh.</span> : null}
     </span>
   );
