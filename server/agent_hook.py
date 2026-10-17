@@ -6,8 +6,9 @@ project keep its hook in its own repo and run this harness from its own environm
     EVAL_HOOK=tests.max_regressions.editor.hook PYTHONPATH=/path/to/eval-editor/server uv run python -m harness
 
 A hook defines `TOOL_NAMES` and `run_agent(prompt, mocks, history=None, context=None)`, and may define
-`custom_check(outputs, check) -> (passed, reason)` for checks of type `custom`, and `judge_model()` to
-return the chat model that grades assertions (default: JUDGE_MODEL).
+`custom_check(outputs, check) -> (passed, reason)` for checks of type `custom`, and either
+`judge_model()` (the chat model that grades assertions; default JUDGE_MODEL) or
+`grade_assertions(assertions, evidence) -> [Grade]` to replace assertion grading entirely.
 """
 
 from __future__ import annotations

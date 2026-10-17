@@ -46,6 +46,7 @@ hook = load_hook()  # after load_dotenv: the agent reads its model settings at i
 DATASET_NAME = os.environ.get("EVAL_DATASET", "eval-editor-demo")
 JUDGE_MODEL = os.environ.get("JUDGE_MODEL", "anthropic:claude-sonnet-5-5")
 EVIDENCE_LIMIT = 60_000
+GIVEN_HISTORY_TURNS = 6
 
 
 def _transcript(messages: list[BaseMessage]) -> list[dict]:
@@ -114,7 +115,7 @@ def all_tools_mocked(outputs: dict) -> dict:
 
 class Grade(BaseModel):
     name: str
-    passed: bool
+    passed: bool | None
     reason: str
 
 
@@ -124,8 +125,9 @@ class Grades(BaseModel):
 
 JUDGE_PROMPT = """You are grading one run of an AI agent against a test's assertions.
 
-Each assertion is a statement that should be true of the run. Judge it only from the evidence: the agent's
-final answer, its messages, and its tool calls with their arguments and results. If the evidence does not show
+Each assertion is a statement that should be true of the run. Judge it only from the evidence: what the agent
+started from (`given`: its context and the end of the prior conversation), its final answer, its messages, and
+its tool calls with their arguments and results. If the evidence does not show
 that the assertion is true, it fails. Return one grade per assertion, using its name, with a one-sentence reason
 that cites the evidence.
 
@@ -144,20 +146,44 @@ def _judge():
     return judge_model() if judge_model else init_chat_model(JUDGE_MODEL)
 
 
-def assertions(outputs: dict, reference_outputs: dict) -> dict:
+def _judge_all(tests: list[dict], evidence: dict) -> list[Grade]:
+    """The default grader: one judge call grades every assertion."""
+    prompt = JUDGE_PROMPT.format(assertions=json.dumps(tests, indent=2),
+                                 evidence=json.dumps(evidence, indent=2, default=str)[:EVIDENCE_LIMIT])
+    return _judge().with_structured_output(Grades, method="json_schema").invoke(prompt).grades
+
+
+def _given(inputs: dict) -> dict:
+    """What the agent started from, so assertions like "left the other fields unchanged" are checkable.
+
+    The context, plus the tail of the history: a long thread would crowd the run itself out of the evidence.
+    """
+    given = {"context": inputs.get("context") or {}}
+    if inputs.get("history"):
+        given["history_tail"] = inputs["history"][-GIVEN_HISTORY_TURNS:]
+    return given
+
+
+def assertions(inputs: dict, outputs: dict, reference_outputs: dict) -> dict:
     """Grades every assertion in one call; each becomes its own feedback key."""
     tests = [t for t in reference_outputs.get("assertions") or [] if t.get("name")]
     if not tests:
         return {"results": []}
-    evidence = {k: outputs.get(k) for k in ("answer", "tool_calls", "transcript")}
-    prompt = JUDGE_PROMPT.format(assertions=json.dumps(tests, indent=2),
-                                 evidence=json.dumps(evidence, indent=2, default=str)[:EVIDENCE_LIMIT])
-    judge = _judge().with_structured_output(Grades, method="json_schema")
-    by_name = {g.name: g for g in judge.invoke(prompt).grades}
+    evidence = {"given": _given(inputs), **{k: outputs.get(k) for k in ("answer", "tool_calls", "transcript")}}
+    # A hook may grade assertions its own way, e.g. with a cheap yes/no classifier that hands only the cases it
+    # is unsure of to a chat model. It returns one {name, passed, reason} per assertion.
+    grade_assertions = getattr(hook, "grade_assertions", None)
+    grades = grade_assertions(tests, evidence) if grade_assertions else _judge_all(tests, evidence)
+    by_name = {g.name: g for g in grades}
     return {"results": [
-        {"key": t["name"], "score": int(by_name[t["name"]].passed) if t["name"] in by_name else None,
+        {"key": t["name"], "score": _score(by_name[t["name"]]) if t["name"] in by_name else None,
          "comment": by_name[t["name"]].reason if t["name"] in by_name else "The judge returned no grade."}
         for t in tests]}
+
+
+def _score(grade: Grade) -> int | None:
+    # None means the grader couldn't decide (e.g. it was unreachable); it must not read as a pass or a fail.
+    return None if grade.passed is None else int(grade.passed)
 
 
 def test_name(example) -> str:
