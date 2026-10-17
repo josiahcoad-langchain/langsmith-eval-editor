@@ -350,7 +350,7 @@ export function isDirty(example: Example, draft: Draft) {
 export type AssertionResult = { key: string; score: number | null; comment: string };
 export type TestResult = {
   runId: string; traceId: string; experimentId: string; experimentName: string;
-  start: string; end: string; status: string; error: string; answer: string; assertions: AssertionResult[];
+  start: string; end: string; status: string; error: string; traceback: string; answer: string; assertions: AssertionResult[];
 };
 
 function feedbackComment(stats: Json) {
@@ -364,6 +364,19 @@ function experimentExampleId(experiment: Json) {
   const extra = isRecord(experiment.extra) ? experiment.extra : {};
   const metadata = isRecord(extra.metadata) ? extra.metadata : {};
   return text(metadata.example_id);
+}
+
+// LangSmith's run error is `repr(exception)` followed by the traceback. The first part is what a person reads
+// ("`create_reel` is not a tool Max has: ..."); the traceback is for debugging the hook.
+export function readableError(error: string) {
+  const head = error.split('\n\nTraceback')[0].trim();
+  const wrapped = /^\w+\((["'])([\s\S]*)\1\)$/.exec(head);
+  return (wrapped ? wrapped[2] : head).replace(/\\(["'])/g, '$1').trim();
+}
+
+export function tracebackOf(error: string) {
+  const at = error.indexOf('Traceback (most recent call last)');
+  return at === -1 ? '' : error.slice(at).trim();
 }
 
 // Every experiment run of one test (example), newest first, with its per-assertion scores.
@@ -384,7 +397,8 @@ export async function fetchResults(datasetId: string, exampleId: string, testNam
       experiment_ids: [...names.keys()],
       example_ids: [exampleId],
       page_size: 50,
-      selects: ['ID', 'TRACE_ID', 'PROJECT_ID', 'START_TIME', 'END_TIME', 'STATUS', 'ERROR_PREVIEW', 'OUTPUTS', 'FEEDBACK_STATS'],
+      // ERROR, not ERROR_PREVIEW: the endpoint silently ignores ERROR_PREVIEW, so every errored run showed no reason.
+      selects: ['ID', 'TRACE_ID', 'PROJECT_ID', 'START_TIME', 'END_TIME', 'STATUS', 'ERROR', 'OUTPUTS', 'FEEDBACK_STATS'],
     },
   });
   const items = isRecord(page) && Array.isArray(page.items) ? page.items.filter(isRecord) : [];
@@ -400,7 +414,8 @@ export async function fetchResults(datasetId: string, exampleId: string, testNam
       start: text(run.start_time),
       end: text(run.end_time),
       status: text(run.status),
-      error: text(run.error_preview),
+      error: readableError(text(run.error) || text(run.error_preview)),
+      traceback: tracebackOf(text(run.error)),
       answer: text(outputs.answer).trim(),
       assertions: Object.entries(stats).filter(([, v]) => isRecord(v)).map(([key, v]) => {
         const stat = v as Json;

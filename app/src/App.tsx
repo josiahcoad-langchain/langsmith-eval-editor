@@ -13,7 +13,7 @@ import { HistoryEditor } from './components/HistoryEditor';
 import { MockToolEditor } from './components/MockToolEditor';
 import { ResultsPanel } from './components/ResultsPanel';
 import {
-  contextProblem, countToolCalls, deleteExample, emptyCheck, emptyExample, errorMessage, fetchAllExamples, fetchDataset, fetchPastRuns, fetchStatuses, importTrace, staleness,
+  contextProblem, countToolCalls, deleteExample, emptyCheck, emptyExample, errorMessage, fetchAllExamples, fetchDataset, fetchPastRuns, fetchResults, fetchStatuses, importTrace, staleness,
   isDirty, keyId, saveExampleTo, shortDate, text, toDraft, toPayload, traceIdFrom,
   type Dataset, type Draft, type Example, type PastRun, type TestStatus, type TestSummary,
 } from './lib/data';
@@ -76,6 +76,8 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
   const [statusTick, setStatusTick] = useState(0);
   const [confirmBatch, setConfirmBatch] = useState<'all' | 'failing' | null>(null);
   const [batchNotice, setBatchNotice] = useState<Notice>(null);
+  // Why the selected test's newest run errored, for the header. Read only for an errored test: one small request.
+  const [lastError, setLastError] = useState('');
   const [drafts, setDrafts] = useState<Record<string, Draft>>({});
   const [selectedId, setSelectedId] = useState<string | undefined>();
   const [loading, setLoading] = useState(true);
@@ -97,6 +99,18 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
     const timer = window.setInterval(() => void refresh(), 30000);
     return () => { cancelled = true; window.clearInterval(timer); };
   }, [dataset, exampleIds, statusTick]);
+
+  const selectedStatus = selectedId ? summaries[selectedId]?.status : undefined;
+  const selectedName = selectedId ? text(examples.find((e) => e.id === selectedId)?.metadata.name) : '';
+  useEffect(() => {
+    setLastError('');
+    if (!dataset || !selectedId || selectedStatus !== 'error') return;
+    let cancelled = false;
+    fetchResults(dataset.id, selectedId, selectedName)
+      .then((results) => { if (!cancelled) setLastError(results.find((r) => r.error)?.error ?? ''); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [dataset, selectedId, selectedStatus, selectedName]);
 
   // Which tests are queued or running. Polled fast while anything is in flight; when a test finishes, the dots
   // are re-read so its new result shows without waiting for the 30s refresh.
@@ -487,7 +501,7 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
                       : notice?.text ?? (saving ? 'Saving…' : dirty ? 'Unsaved changes…' : 'All changes saved')}
                   </Text>
                   {!selected.isNew ? (
-                    <LastRun summary={summaries[selected.id]} onOpen={() => setShowResults(true)}
+                    <LastRun summary={summaries[selected.id]} error={lastError} onOpen={() => setShowResults(true)}
                       stale={dirty ? 'the test has unsaved edits' : staleness(summaries[selected.id], selected, metadata?.agentCommit)} />
                   ) : null}
                 </div>

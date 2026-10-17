@@ -176,6 +176,12 @@ export function ResultsPanel({ datasetId, example, workspaceId, onClose }: { dat
                       <button type="button" className="text-secondary underline hover:text-primary" onClick={() => void openTrace(result)}>Trace</button>
                     </div>
                     {result.error ? <Text variant="xs" color="error">{result.error}</Text> : null}
+                    {result.traceback ? (
+                      <details className="text-xs text-tertiary">
+                        <summary className="cursor-pointer">Show traceback</summary>
+                        <pre className="mt-space-1 max-h-60 overflow-auto whitespace-pre-wrap font-mono">{result.traceback}</pre>
+                      </details>
+                    ) : null}
                     {openAnswer === result.runId ? (
                       <p className="max-h-64 overflow-y-auto whitespace-pre-wrap rounded-md bg-surface-level-2 p-space-2 text-xs text-primary">{result.answer}</p>
                     ) : null}

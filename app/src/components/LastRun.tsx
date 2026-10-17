@@ -3,7 +3,7 @@ import { shortDate, type TestSummary } from '../lib/data';
 // The test's newest result in one line at the top of the test, like an IDE's last-run banner: when, how it went,
 // what it cost, how long it took and which agent commit it ran on. When the result no longer describes the test
 // (`stale`), it says so instead of passing an old result off as current.
-export function LastRun({ summary, stale, onOpen }: { summary?: TestSummary; stale: string | null; onOpen: () => void }) {
+export function LastRun({ summary, stale, error = '', onOpen }: { summary?: TestSummary; stale: string | null; error?: string; onOpen: () => void }) {
   if (!summary) return null;
   if (summary.status === 'none') return <span className="text-xs text-tertiary">Never run.</span>;
   const keys = Object.values(summary.keys);
@@ -24,6 +24,7 @@ export function LastRun({ summary, stale, onOpen }: { summary?: TestSummary; sta
         <button type="button" className="underline-offset-2 hover:underline" onClick={onOpen}>Last run {shortDate(summary.ranAt)}</button>
         {': '}<span className={stale ? '' : tone}>{verdict}</span>{' · '}{parts.join(' · ')}
       </span>
+      {summary.status === 'error' && error ? <span className="text-error-primary">Why: {error}</span> : null}
       {stale ? <span className="text-warning-primary">Out of date: {stale}. Run it again to refresh.</span> : null}
     </span>
   );
