@@ -8,7 +8,7 @@ A test editor for LangChain agents, backed by a LangSmith dataset. Each test is 
 
 **Run test** runs the real agent against the mocks several times in parallel and logs one LangSmith experiment per run. The Results column shows each assertion's pass rate across repetitions and flags flaky assertions.
 
-![The editor: a test's mocks and prompt on the left, its experiments on the right. The newest run fails all-tools-mocked because get_shipping_status has no mock.](docs/screenshot.png)
+![The editor: a test's mocks and prompt on the left, its experiments on the right. The newest run errored because get_shipping_status has no mock.](docs/screenshot.png)
 
 The UI runs either as a normal web app served by the eval server (**standalone**, the default) or inside LangSmith as a **custom app**. Both use the same `App.tsx`.
 
@@ -18,7 +18,7 @@ server/
   hook.py       how the harness runs YOUR agent: the one file to change for another agent
   demo_agent.py a small customer-support agent (orders, shipping, refunds) to demo on
   mocks.py      test mocks, applied as LangChain middleware; strict replay
-  harness.py    runs tests via langsmith.evaluate: repetitions, judge, all-tools-mocked
+  harness.py    runs tests via langsmith.evaluate: repetitions, judge, code checks
   seed.py       creates the dataset with four starter tests
   main.py       FastAPI: serves the web build, proxies the LangSmith API, runs tests, receives the webhook
   run_queue.py  custom-app mode: reads run requests from a Context Hub prompt repo
@@ -59,7 +59,7 @@ From the command line, `uv run python harness.py [test names] -r 3` runs tests w
 
 1. `harness.target` builds a `MockTools` from the test's `inputs.mock_tools` and calls `hook.run_agent(prompt, mocks)`.
 2. `hook.run_agent` runs the agent with `mocks.middleware()`, which answers every tool call from the mocks. Real tools never execute.
-3. Replay is strict. A call to a tool the test doesn't mock, or with arguments no case matches, returns an error to the agent and is recorded. The built-in `all-tools-mocked` check scores that run 0, so a test passes only when it pins down everything the agent touched.
+3. Replay is strict. A call to a tool the test doesn't mock, or with arguments no case matches, makes the run an **error** ("Test incomplete: no mock answered …"), not a grade: the test is what needs fixing, and anything the agent did after answering an error the test never wrote says nothing about the agent.
 4. Dates in mock responses (strings starting `YYYY-MM-DD`) move forward by the days since `inputs.recorded_on`, so recorded data looks exactly as fresh on every run.
 5. One judge call grades every assertion. Each assertion name becomes a feedback key with score 1 or 0 and a one-sentence reason.
 6. `evaluate(..., num_repetitions=n, max_concurrency=n)` runs the repetitions in parallel as one experiment, prefixed with the test name. Mocks live inside each run, so tests also run side by side.

@@ -262,7 +262,6 @@ export function toPayload(example: Example, draft: Draft): { payload?: Pick<Exam
   if (draft.checks.some((check) => !check.name.trim())) return { error: 'Every check needs a name.' };
   // Assertions and checks share one namespace: each name becomes a LangSmith feedback key.
   const names = [...assertions.map((row) => row.name.trim()), ...draft.checks.map((check) => check.name.trim())];
-  if (names.includes('all-tools-mocked')) return { error: '"all-tools-mocked" is reserved for the built-in check.' };
   const dupe = names.find((name, index) => names.indexOf(name) !== index);
   if (dupe) return { error: `Two assertions or checks are named "${dupe}".` };
   for (const check of draft.checks) {

@@ -13,8 +13,9 @@ A test's `inputs.mock_tools` maps a tool name to what it returns:
         {"response": "saved"}]}
 
 Replay is strict: a tool with no mock, or no matching case, never runs for real. The agent gets an error
-ToolMessage ("<tool> is not mocked in this test") and the call is recorded in `unmocked`, which the harness
-turns into a failing `all-tools-mocked` score. A test can only pass if it mocks everything the agent touched.
+ToolMessage ("<tool> is not mocked in this test") and the call is recorded in `unmocked`. The harness then
+fails the whole run as an incomplete test (an error, not a grade), so a test can only produce grades if it
+mocks everything the agent touched.
 
 Dates in responses (strings that start with YYYY-MM-DD) move forward by the days between `recorded_on` and
 today, so recorded data looks exactly as fresh on every run as it did the day it was recorded.

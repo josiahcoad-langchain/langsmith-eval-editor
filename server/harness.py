@@ -13,10 +13,11 @@ this turn, so replayed history never counts as the agent's own work.
   metadata.name, metadata.description     what the test is
 
 A test runs `repetitions` times in parallel as one experiment, because an agent that passes once can still be
-flaky. Every run gets three kinds of feedback:
-  all-tools-mocked   0 if the agent called a tool the test doesn't mock (the run touched something unpinned)
+flaky. Every run gets two kinds of feedback:
   <assertion name>   1 / 0 per assertion, graded together in one LLM call against the transcript
   <check name>       1 / 0 per code check, graded in code (None for an unknown type, never a silent pass)
+A run that called a tool the test doesn't mock is not graded at all: it errors with IncompleteTest, because
+the test, not the agent, is what needs fixing.
 
     uv run python harness.py                       # every test, 3 repetitions
     uv run python harness.py refund-damaged -r 1   # by name
@@ -94,23 +95,27 @@ def target(inputs: dict) -> dict:
     """One run of one test: the agent answers the prompt with every tool call served from the test's mocks."""
     mocks = MockTools(inputs.get("mock_tools"), inputs.get("recorded_on"))
     messages = _run_agent(inputs, mocks)
+    if mocks.unmocked:
+        # Not a grade: the test is incomplete. After the first unmocked call the agent was answering an error
+        # the test never wrote, so nothing it did afterwards says anything about the agent.
+        names = ", ".join(sorted({call["name"] for call in mocks.unmocked}))
+        raise IncompleteTest(f"Test incomplete: no mock answered {names}. Mock it (or add a matching case).")
     turn = _this_turn(messages, inputs)
     answer = next((m.text for m in reversed(turn) if isinstance(m, AIMessage) and m.text), "")
-    return {"answer": answer, "tool_calls": mocks.calls, "unmocked_calls": mocks.unmocked,
-            "model_calls": _model_calls(turn), "transcript": _transcript(turn)}
+    return {"answer": answer, "tool_calls": mocks.calls, "model_calls": _model_calls(turn),
+            "transcript": _transcript(turn)}
 
 
 def code_checks(outputs: dict, reference_outputs: dict) -> dict:
     """Grades `outputs.checks` in code; each check becomes its own feedback key (see checks.py)."""
     checks = reference_outputs.get("checks") or []
+    if not outputs:  # the run errored
+        return {"results": []}
     return {"results": run_checks(outputs, checks, custom=getattr(hook, "custom_check", None))}
 
 
-def all_tools_mocked(outputs: dict) -> dict:
-    unmocked = outputs.get("unmocked_calls") or []
-    names = sorted({call["name"] for call in unmocked})
-    return {"key": "all-tools-mocked", "score": int(not unmocked),
-            "comment": f"Called without a mock: {', '.join(names)}" if names else "Every tool call was mocked."}
+class IncompleteTest(Exception):
+    """The agent called a tool the test has no mock for. The test needs fixing, not the agent."""
 
 
 class Grade(BaseModel):
@@ -167,7 +172,7 @@ def _given(inputs: dict) -> dict:
 def assertions(inputs: dict, outputs: dict, reference_outputs: dict) -> dict:
     """Grades every assertion in one call; each becomes its own feedback key."""
     tests = [t for t in reference_outputs.get("assertions") or [] if t.get("name")]
-    if not tests:
+    if not tests or not outputs:  # no outputs: the run errored, so there is nothing of the agent's to grade
         return {"results": []}
     evidence = {"given": _given(inputs), **{k: outputs.get(k) for k in ("answer", "tool_calls", "transcript")}}
     # A hook may grade assertions its own way, e.g. with a cheap yes/no classifier that hands only the cases it
@@ -193,7 +198,7 @@ def test_name(example) -> str:
 def run_test(example, repetitions: int = 3, client: Client | None = None) -> str:
     """Runs one test `repetitions` times as one experiment and returns the experiment's name."""
     name = test_name(example)
-    results = evaluate(target, data=[example], evaluators=[all_tools_mocked, assertions, code_checks], client=client,
+    results = evaluate(target, data=[example], evaluators=[assertions, code_checks], client=client,
                        num_repetitions=repetitions, max_concurrency=repetitions, experiment_prefix=name,
                        metadata={"test": name, "example_id": str(example.id), "repetitions": repetitions})
     return results.experiment_name

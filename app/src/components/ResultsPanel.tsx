@@ -111,9 +111,9 @@ export function ResultsPanel({ datasetId, example, workspaceId, onClose }: { dat
       {!results && !error ? <div className="flex items-center gap-space-2"><Spinner size="sm" /><Text variant="xs" color="tertiary">Loading results…</Text></div> : null}
       {results && results.length === 0 && !queued.length ? <Text variant="xs" color="tertiary">No runs of this test yet. Click Run test.</Text> : null}
       {results ? groupByExperiment(results).map((group) => {
-        // The built-in all-tools-mocked check first, then the test's own assertions.
+        // The test's own assertions, then its code checks.
         // Code checks (outputs.checks) log feedback exactly like assertions, so they are told apart by name and listed last.
-        const rank = (key: string) => (key === 'all-tools-mocked' ? 0 : checkNames.has(key) ? 2 : 1);
+        const rank = (key: string) => (checkNames.has(key) ? 2 : 1);
         const keys = [...new Set(group.runs.flatMap((r) => r.assertions.map((a) => a.key)))].sort((a, b) => rank(a) - rank(b));
         const running = group.runs.filter((r) => !r.end || r.status.toLowerCase() === 'pending').length;
         const rows = keys.map((key) => {

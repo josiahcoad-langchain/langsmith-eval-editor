@@ -15,13 +15,13 @@ A Given / When / Assert test editor for an agent, over one LangSmith dataset (de
 - `src/web.tsx`: a `window.langsmith` shim over the server's `/api/langsmith/*` proxy, plus light/dark from
   `prefers-color-scheme`.
 - `src/components/`: `MockToolEditor` (When / Returns table, cases per argument), `ResultsPanel` (polls every 15 s;
-  groups repetitions by experiment; `all-tools-mocked` first), `fields`.
+  groups repetitions by experiment), `fields`.
 
 ## Data shape
 
 `inputs.prompt`, `inputs.mock_tools` (`{tool: response | {"cases": [{when, response}]} | {"raise": msg}}`),
 `inputs.recorded_on`, `outputs.assertions` (`[{name, assertion}]`), `metadata.name|description|dataset_split`.
-Assertion and test names are lowercase-with-dashes (typed `_`/spaces convert). `all-tools-mocked` is reserved.
+Assertion and test names are lowercase-with-dashes (typed `_`/spaces convert).
 
 ## Decisions
 

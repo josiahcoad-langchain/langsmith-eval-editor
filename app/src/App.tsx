@@ -404,7 +404,7 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
                 summary={`${draft.mockTools.length} mock tool${draft.mockTools.length === 1 ? '' : 's'}`}>
                 <Subsection
                   title="Mock tools"
-                  hint={`Every tool the agent may call in this test, with what it returns. A call to a tool that isn't listed fails, and so does the test (all-tools-mocked).${
+                  hint={`Every tool the agent may call in this test, with what it returns. A call to a tool that isn't listed makes the run an error: the test is incomplete, so it isn't graded.${
                     text(selected.inputs.recorded_on) ? ` Recorded ${text(selected.inputs.recorded_on)}: on each run, dates in these responses move forward by the days since then, so the data stays as fresh as it was that day.` : ''
                   }`}
                   addLabel="Add mock"
