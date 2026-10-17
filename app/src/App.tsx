@@ -12,9 +12,9 @@ import { HistoryEditor } from './components/HistoryEditor';
 import { MockToolEditor } from './components/MockToolEditor';
 import { ResultsPanel } from './components/ResultsPanel';
 import {
-  contextProblem, countToolCalls, deleteExample, emptyCheck, emptyExample, errorMessage, fetchAllExamples, fetchDataset, fetchPastRuns, importTrace,
+  contextProblem, countToolCalls, deleteExample, emptyCheck, emptyExample, errorMessage, fetchAllExamples, fetchDataset, fetchPastRuns, fetchStatuses, importTrace,
   isDirty, keyId, saveExampleTo, shortDate, text, toDraft, toPayload, traceIdFrom,
-  type Dataset, type Draft, type Example, type PastRun,
+  type Dataset, type Draft, type Example, type PastRun, type TestStatus,
 } from './lib/data';
 import { requestRun } from './runs';
 
@@ -23,7 +23,23 @@ const REPETITION_CHOICES = [1, 3, 5];
 
 type Notice = { kind: 'error' | 'success'; text: string } | null;
 
-function RailButton({ active, title, subtitle, badge, onClick }: { active: boolean; title: string; subtitle: string; badge?: string; onClick: () => void }) {
+// The newest run's verdict, as a dot before the test's name, like an IDE's test explorer.
+const STATUS_DOT: Record<TestStatus, { glyph: string; color: string; label: string }> = {
+  pass: { glyph: '●', color: 'text-success-primary', label: 'Newest run: every assertion and check passed on every repetition' },
+  fail: { glyph: '●', color: 'text-error-primary', label: 'Newest run: something failed on every repetition' },
+  flaky: { glyph: '●', color: 'text-warning-primary', label: 'Newest run: passed on some repetitions and failed on others' },
+  error: { glyph: '!', color: 'text-error-primary', label: 'Newest run errored, e.g. the test is incomplete: no grades' },
+  none: { glyph: '○', color: 'text-tertiary', label: 'Never run' },
+};
+
+function StatusDot({ status }: { status: TestStatus }) {
+  const dot = STATUS_DOT[status];
+  return <span className={`w-3 shrink-0 text-center font-bold ${dot.color}`} title={dot.label} aria-label={dot.label}>{dot.glyph}</span>;
+}
+
+function RailButton({ active, title, subtitle, badge, status, onClick }: {
+  active: boolean; title: string; subtitle: string; badge?: string; status?: TestStatus; onClick: () => void;
+}) {
   return (
     <button
       type="button"
@@ -33,7 +49,10 @@ function RailButton({ active, title, subtitle, badge, onClick }: { active: boole
       onClick={onClick}
     >
       <span className="flex items-center justify-between gap-space-2">
-        <span className="truncate font-mono font-medium">{title}</span>
+        <span className="flex min-w-0 items-center gap-space-1">
+          {status ? <StatusDot status={status} /> : null}
+          <span className="truncate font-mono font-medium">{title}</span>
+        </span>
         {badge ? <span className="shrink-0 text-xs text-tertiary">{badge}</span> : null}
       </span>
       <span className="line-clamp-2 text-xs text-tertiary">{subtitle}</span>
@@ -44,6 +63,7 @@ function RailButton({ active, title, subtitle, badge, onClick }: { active: boole
 export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) {
   const [dataset, setDataset] = useState<Dataset | null>(null);
   const [examples, setExamples] = useState<Example[]>([]);
+  const [statuses, setStatuses] = useState<Record<string, TestStatus>>({});
   const [drafts, setDrafts] = useState<Record<string, Draft>>({});
   const [selectedId, setSelectedId] = useState<string | undefined>();
   const [loading, setLoading] = useState(true);
@@ -52,6 +72,16 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
   const [notice, setNotice] = useState<Notice>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const savingIds = useRef(new Set<string>());
+
+  // Test-list dots. Refreshed on a timer so a run started from the Results panel (or the CLI) shows up.
+  useEffect(() => {
+    if (!dataset) return;
+    let cancelled = false;
+    const refresh = () => fetchStatuses(dataset.id).then((next) => { if (!cancelled) setStatuses(next); }).catch(() => {});
+    void refresh();
+    const timer = window.setInterval(() => void refresh(), 30000);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [dataset]);
   const [importing, setImporting] = useState<'closed' | 'open' | 'busy'>('closed');
   const [importRef, setImportRef] = useState('');
   const [importStatus, setImportStatus] = useState<Notice>(null);
@@ -318,6 +348,7 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
               title={exampleDraft?.name || 'Untitled test'}
               subtitle={exampleDraft?.description || `${count} assertions`}
               badge={example.isNew ? 'new' : dirtyIds.has(example.id) ? '● unsaved' : `${count} asserts`}
+              status={example.isNew ? undefined : statuses[example.id] ?? 'none'}
               onClick={() => select(example.id)}
             />
           );

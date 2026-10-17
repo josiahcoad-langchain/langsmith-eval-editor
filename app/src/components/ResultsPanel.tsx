@@ -45,7 +45,7 @@ export function ResultsPanel({ datasetId, example, workspaceId, onClose }: { dat
     const refresh = async () => {
       setChecking(true);
       try {
-        const next = await fetchResults(datasetId, example.id);
+        const next = await fetchResults(datasetId, example.id, text(example.metadata.name));
         const pending = await fetchPending(example.id, next[0]?.start ?? '');
         if (!alive) return;
         setResults(next);

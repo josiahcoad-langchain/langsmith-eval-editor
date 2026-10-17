@@ -356,10 +356,24 @@ function feedbackComment(stats: Json) {
   return typeof comments === 'string' ? comments : '';
 }
 
+// The test (example) an experiment ran: the harness writes it into the experiment's metadata.
+function experimentExampleId(experiment: Json) {
+  const extra = isRecord(experiment.extra) ? experiment.extra : {};
+  const metadata = isRecord(extra.metadata) ? extra.metadata : {};
+  return text(metadata.example_id);
+}
+
 // Every experiment run of one test (example), newest first, with its per-assertion scores.
-export async function fetchResults(datasetId: string, exampleId: string): Promise<TestResult[]> {
-  const sessions = await callLangSmith<unknown>('GET /api/v1/sessions', { params: { reference_dataset: datasetId, limit: '50' } });
-  const experiments = (Array.isArray(sessions) ? sessions : []).filter(isRecord);
+//
+// Asks for THIS test's experiments (the harness names them `<test name>-<suffix>`), then keeps the ones whose
+// metadata names this example. Fetching "the dataset's 50 newest experiments" and filtering after looked fine
+// on a small dataset and showed "No runs" for every test once the dataset had run more than 50.
+export async function fetchResults(datasetId: string, exampleId: string, testName: string): Promise<TestResult[]> {
+  const params: Record<string, string> = { reference_dataset: datasetId, limit: '50' };
+  if (testName) params.name_contains = testName;
+  const sessions = await callLangSmith<unknown>('GET /api/v1/sessions', { params });
+  const experiments = (Array.isArray(sessions) ? sessions : []).filter(isRecord)
+    .filter((experiment) => !experimentExampleId(experiment) || experimentExampleId(experiment) === exampleId);
   if (!experiments.length) return [];
   const names = new Map(experiments.map((e) => [text(e.id), text(e.name)]));
   const page = await callLangSmith<unknown>(`POST /api/v2/datasets/${datasetId}/experiment-runs`, {
@@ -391,6 +405,41 @@ export async function fetchResults(datasetId: string, exampleId: string): Promis
       }),
     };
   }).sort((a, b) => b.start.localeCompare(a.start));
+}
+
+// --- Test status (the dot in the test list) ---------------------------------------------------------------------
+
+// pass: every assertion and check passed on every repetition. fail: some assertion or check failed on every
+// repetition. flaky: anything in between. error: every run raised (e.g. an incomplete test). none: never run.
+export type TestStatus = 'pass' | 'fail' | 'flaky' | 'error' | 'none';
+
+function statusOf(experiment: Json): TestStatus {
+  const errorRate = typeof experiment.error_rate === 'number' ? experiment.error_rate : 0;
+  if (errorRate >= 1) return 'error';
+  const stats = Object.values(isRecord(experiment.feedback_stats) ? experiment.feedback_stats : {}).filter(isRecord);
+  if (!stats.length) return 'none';
+  if (stats.some((stat) => stat.max === 0)) return 'fail';
+  if (errorRate > 0 || stats.some((stat) => stat.min !== 1)) return 'flaky';
+  return 'pass';
+}
+
+// The status of every test's newest experiment, by example id. Each test's runs are their own experiment, and
+// an experiment's list entry carries its per-key min/max (include_stats), so this is a few paged list calls,
+// not one call per test.
+export async function fetchStatuses(datasetId: string): Promise<Record<string, TestStatus>> {
+  const newest: Record<string, Json> = {};
+  for (let offset = 0; ; offset += 100) {
+    const page = await callLangSmith<unknown>('GET /api/v1/sessions', {
+      params: { reference_dataset: datasetId, include_stats: 'true', limit: '100', offset: String(offset) },
+    });
+    const experiments = (Array.isArray(page) ? page : []).filter(isRecord);
+    for (const experiment of experiments) {
+      const exampleId = experimentExampleId(experiment);
+      if (exampleId && text(experiment.start_time) > text(newest[exampleId]?.start_time)) newest[exampleId] = experiment;
+    }
+    if (experiments.length < 100) break;
+  }
+  return Object.fromEntries(Object.entries(newest).map(([exampleId, experiment]) => [exampleId, statusOf(experiment)]));
 }
 
 // --- Import a past run as a test -----------------------------------------------------------------------------
