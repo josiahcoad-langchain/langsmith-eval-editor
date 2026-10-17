@@ -14,9 +14,9 @@ import { ResultsPanel } from './components/ResultsPanel';
 import {
   contextProblem, countToolCalls, deleteExample, emptyCheck, emptyExample, errorMessage, fetchAllExamples, fetchDataset, fetchPastRuns, fetchStatuses, importTrace,
   isDirty, keyId, saveExampleTo, shortDate, text, toDraft, toPayload, traceIdFrom,
-  type Dataset, type Draft, type Example, type PastRun, type TestStatus,
+  type Dataset, type Draft, type Example, type PastRun, type TestStatus, type TestSummary,
 } from './lib/data';
-import { requestRun } from './runs';
+import { fetchActiveRuns, isWeb, requestRun, requestRuns } from './runs';
 
 const AUTOSAVE_MS = 800;
 const REPETITION_CHOICES = [1, 3, 5];
@@ -24,7 +24,11 @@ const REPETITION_CHOICES = [1, 3, 5];
 type Notice = { kind: 'error' | 'success'; text: string } | null;
 
 // The newest run's verdict, as a dot before the test's name, like an IDE's test explorer.
-const STATUS_DOT: Record<TestStatus, { glyph: string; color: string; label: string }> = {
+type ListStatus = TestStatus | 'queued' | 'running';
+
+const STATUS_DOT: Record<ListStatus, { glyph: string; color: string; label: string }> = {
+  running: { glyph: '◐', color: 'text-secondary animate-spin', label: 'Running now' },
+  queued: { glyph: '◌', color: 'text-tertiary', label: 'Queued: waits for a free slot (4 tests run at a time)' },
   pass: { glyph: '●', color: 'text-success-primary', label: 'Newest run: every assertion and check passed on every repetition' },
   fail: { glyph: '●', color: 'text-error-primary', label: 'Newest run: something failed on every repetition' },
   flaky: { glyph: '●', color: 'text-warning-primary', label: 'Newest run: passed on some repetitions and failed on others' },
@@ -32,13 +36,13 @@ const STATUS_DOT: Record<TestStatus, { glyph: string; color: string; label: stri
   none: { glyph: '○', color: 'text-tertiary', label: 'Never run' },
 };
 
-function StatusDot({ status }: { status: TestStatus }) {
+function StatusDot({ status }: { status: ListStatus }) {
   const dot = STATUS_DOT[status];
   return <span className={`w-3 shrink-0 text-center font-bold ${dot.color}`} title={dot.label} aria-label={dot.label}>{dot.glyph}</span>;
 }
 
 function RailButton({ active, title, subtitle, badge, status, onClick }: {
-  active: boolean; title: string; subtitle: string; badge?: string; status?: TestStatus; onClick: () => void;
+  active: boolean; title: string; subtitle: string; badge?: string; status?: ListStatus; onClick: () => void;
 }) {
   return (
     <button
@@ -63,7 +67,12 @@ function RailButton({ active, title, subtitle, badge, status, onClick }: {
 export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) {
   const [dataset, setDataset] = useState<Dataset | null>(null);
   const [examples, setExamples] = useState<Example[]>([]);
-  const [statuses, setStatuses] = useState<Record<string, TestStatus>>({});
+  const [summaries, setSummaries] = useState<Record<string, TestSummary>>({});
+  // Runs queued or in progress on the server, by example id (web mode), and a counter that re-reads the dots.
+  const [activeRuns, setActiveRuns] = useState<Record<string, 'queued' | 'running'>>({});
+  const [statusTick, setStatusTick] = useState(0);
+  const [confirmBatch, setConfirmBatch] = useState<'all' | 'failing' | null>(null);
+  const [batchNotice, setBatchNotice] = useState<Notice>(null);
   const [drafts, setDrafts] = useState<Record<string, Draft>>({});
   const [selectedId, setSelectedId] = useState<string | undefined>();
   const [loading, setLoading] = useState(true);
@@ -79,12 +88,30 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
   useEffect(() => {
     if (!dataset || !exampleIds) return;
     let cancelled = false;
-    const show = (next: Record<string, TestStatus>) => { if (!cancelled) setStatuses(next); };
+    const show = (next: Record<string, TestSummary>) => { if (!cancelled) setSummaries(next); };
     const refresh = () => fetchStatuses(dataset.id, exampleIds.split(','), show).then(show).catch(() => {});
     void refresh();
     const timer = window.setInterval(() => void refresh(), 30000);
     return () => { cancelled = true; window.clearInterval(timer); };
-  }, [dataset, exampleIds]);
+  }, [dataset, exampleIds, statusTick]);
+
+  // Which tests are queued or running. Polled fast while anything is in flight; when a test finishes, the dots
+  // are re-read so its new result shows without waiting for the 30s refresh.
+  useEffect(() => {
+    if (!isWeb()) return;
+    let cancelled = false;
+    let previous: Record<string, 'queued' | 'running'> = {};
+    const poll = async () => {
+      const next = await fetchActiveRuns().catch(() => previous);
+      if (cancelled) return;
+      if (Object.keys(previous).some((id) => !(id in next))) setStatusTick((tick) => tick + 1);
+      previous = next;
+      setActiveRuns(next);
+    };
+    void poll();
+    const timer = window.setInterval(() => void poll(), 3000);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, []);
   const [importing, setImporting] = useState<'closed' | 'open' | 'busy'>('closed');
   const [importRef, setImportRef] = useState('');
   const [importStatus, setImportStatus] = useState<Notice>(null);
@@ -266,6 +293,29 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
     }
   };
 
+  const savedExamples = examples.filter((e) => !e.isNew);
+  const failingExamples = savedExamples.filter((e) => ['fail', 'flaky', 'error'].includes(summaries[e.id]?.status ?? ''));
+  const batchFor = (which: 'all' | 'failing') => (which === 'all' ? savedExamples : failingExamples);
+
+  // Predicted agent cost: each test's cost per repetition on its newest run, times the repetitions chosen.
+  // Tests with no priced run yet are counted separately rather than guessed.
+  const estimate = (batch: Example[]) => {
+    const priced = batch.map((e) => summaries[e.id]?.costPerRun).filter((c): c is number => c !== null && c !== undefined);
+    return { dollars: priced.reduce((sum, c) => sum + c, 0) * repetitions, unpriced: batch.length - priced.length };
+  };
+  const formatDollars = (dollars: number) => (dollars < 0.01 ? `$${dollars.toFixed(4)}` : `$${dollars.toFixed(2)}`);
+
+  const runBatch = async (which: 'all' | 'failing') => {
+    const batch = batchFor(which);
+    setConfirmBatch(null);
+    try {
+      await requestRuns(batch.map((e) => ({ test: drafts[e.id]?.name ?? '', exampleId: e.id, repetitions })));
+      setBatchNotice({ kind: 'success', text: `Started ${batch.length} test${batch.length === 1 ? '' : 's'}. Dots update as each finishes.` });
+    } catch (error) {
+      setBatchNotice({ kind: 'error', text: `Could not start the runs: ${errorMessage(error)}` });
+    }
+  };
+
   const runTest = async () => {
     if (!selected || !draft) return;
     setRunning(true);
@@ -295,6 +345,38 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
           <Button size="sm" color="primary" onClick={() => addExample()} disabled={loading}>New</Button>
         </div>
       </div>
+      {/* Run several tests at once, like an IDE's test explorer. Both confirm first: every test is a real agent
+          run per repetition. "Failing" is every test whose newest result is red, amber or errored. */}
+      <div className="flex flex-wrap gap-space-1">
+        <Button size="sm" variant="outlined" color="secondary" onClick={() => setConfirmBatch('all')} disabled={loading || !savedExamples.length}>
+          Run all ({savedExamples.length})
+        </Button>
+        <Button size="sm" variant="outlined" color="secondary" onClick={() => setConfirmBatch('failing')} disabled={loading || !failingExamples.length}>
+          Run failing ({failingExamples.length})
+        </Button>
+      </div>
+      {confirmBatch ? (
+        <div className="flex flex-col gap-space-1 rounded-md border border-default p-space-2 text-xs text-secondary">
+          <span>
+            Run {batchFor(confirmBatch).length} test{batchFor(confirmBatch).length === 1 ? '' : 's'} × {repetitions} repetition{repetitions === 1 ? '' : 's'}
+            {' '}= {batchFor(confirmBatch).length * repetitions} agent runs, 4 tests at a time?
+          </span>
+          {(() => {
+            const { dollars, unpriced } = estimate(batchFor(confirmBatch));
+            return (
+              <span className="text-tertiary">
+                Estimated agent cost ≈ {formatDollars(dollars)}, from each test's last run
+                {unpriced ? ` (${unpriced} test${unpriced === 1 ? ' has' : 's have'} no priced run yet)` : ''}. Excludes grading.
+              </span>
+            );
+          })()}
+          <span className="flex gap-space-1">
+            <Button size="sm" color="primary" onClick={() => void runBatch(confirmBatch)}>Run</Button>
+            <Button size="sm" variant="outlined" color="secondary" onClick={() => setConfirmBatch(null)}>Cancel</Button>
+          </span>
+        </div>
+      ) : null}
+      {batchNotice ? <Text variant="xs" color={batchNotice.kind === 'error' ? 'error' : 'tertiary'}>{batchNotice.text}</Text> : null}
       {importing !== 'closed' ? (
         <div className="flex flex-col gap-space-2 rounded-md border border-default bg-surface-level-2 p-space-2">
           <div className="flex flex-col">
@@ -351,7 +433,7 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
               title={exampleDraft?.name || 'Untitled test'}
               subtitle={exampleDraft?.description || `${count} assertions`}
               badge={example.isNew ? 'new' : dirtyIds.has(example.id) ? '● unsaved' : `${count} asserts`}
-              status={example.isNew ? undefined : statuses[example.id]}
+              status={example.isNew ? undefined : activeRuns[example.id] ?? summaries[example.id]?.status}
               onClick={() => select(example.id)}
             />
           );
@@ -430,7 +512,7 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
               <Section>
                 <div className="grid grid-cols-[minmax(0,240px)_minmax(0,1fr)] gap-space-3">
                   <TextField label="Name" value={draft.name} onChange={(name) => patchDraft({ name: name.toLowerCase().replace(/[\s_]+/g, '-') })} placeholder="refund-service-down" mono />
-                  <TextAreaField label="Description" value={draft.description} onChange={(description) => patchDraft({ description })} rows={1} placeholder="What this test covers" />
+                  <TextAreaField label="Description" value={draft.description} onChange={(description) => patchDraft({ description })} rows={1} maxRows={5} placeholder="What this test covers" />
                 </div>
               </Section>
 

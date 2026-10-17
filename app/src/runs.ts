@@ -23,21 +23,46 @@ async function errorFrom(response: Response) {
 }
 
 export async function requestRun(request: RunRequest) {
+  await requestRuns([request]);
+}
+
+// Several tests in one go (Run all, Run failing). The web server runs a few at a time and queues the rest.
+export async function requestRuns(requests: RunRequest[]) {
+  if (!requests.length) return;
   if (web) {
     const response = await fetch('/api/runs', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ example_ids: [request.exampleId], repetitions: request.repetitions }),
+      body: JSON.stringify({ example_ids: requests.map((r) => r.exampleId), repetitions: requests[0].repetitions }),
     });
     if (!response.ok) throw await errorFrom(response);
     return;
   }
-  await commitRequest({
-    test: request.test,
-    example_id: request.exampleId,
-    repetitions: request.repetitions,
-    requested_at: new Date().toISOString(),
-  });
+  // One commit per test: that is the custom-app queue's unit, and the server de-duplicates by test.
+  for (const request of requests) {
+    await commitRequest({
+      test: request.test,
+      example_id: request.exampleId,
+      repetitions: request.repetitions,
+      requested_at: new Date().toISOString(),
+    });
+  }
+}
+
+// Tests with a run queued or in progress right now, by example id. Web mode only: the custom-app queue lives in
+// a prompt repo the server drains on its own schedule, so the app cannot tell queued from finished.
+export async function fetchActiveRuns(): Promise<Record<string, 'queued' | 'running'>> {
+  if (!web) return {};
+  const response = await fetch('/api/runs');
+  if (!response.ok) return {};
+  const active: Record<string, 'queued' | 'running'> = {};
+  for (const job of (await response.json()) as Json[]) {
+    const state = job.state;
+    const id = text(job.example_id);
+    if (state === 'running') active[id] = 'running';
+    else if (state === 'queued' && active[id] !== 'running') active[id] = 'queued';
+  }
+  return active;
 }
 
 // Runs of this test that haven't produced results yet.

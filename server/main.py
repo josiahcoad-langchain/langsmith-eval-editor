@@ -7,7 +7,7 @@ Standalone mode (the editor runs in your browser, served from here):
   /api/langsmith/<path>   the LangSmith API, called with this server's LANGSMITH_API_KEY. The editor's code is
                           written against LangSmith's custom-app bridge (window.langsmith.call); in standalone
                           mode that bridge is a shim that forwards here, so one UI works in both modes.
-  /api/runs               POST {example_ids, repetitions} runs tests now; GET lists runs in flight.
+  /api/runs               POST {example_ids, repetitions} runs tests (4 at a time, the rest queued); GET lists runs.
   /api/config             workspace URL, for links into LangSmith.
 
 Custom-app mode (the editor runs inside LangSmith and can't reach this server):
@@ -76,16 +76,23 @@ class RunRequest(BaseModel):
 
 _runs: dict[str, dict] = {}
 
+# How many tests run at once. "Run all" sends every test in one request; starting them all together would put
+# (tests x repetitions) agent runs on the model provider at the same moment. The rest wait as "queued". Same
+# limit as harness.run_tests uses from the command line.
+MAX_PARALLEL_TESTS = 4
+_slots = threading.Semaphore(MAX_PARALLEL_TESTS)
+
 
 def _run(run_id: str) -> None:
     job = _runs[run_id]
-    job["state"] = "running"
-    try:
-        harness.run_tests(example_ids=[job["example_id"]], repetitions=job["repetitions"])
-        job["state"] = "done"
-    except Exception as error:  # noqa: BLE001 - surface it in the UI instead of killing the server
-        log.exception("run %s failed", run_id)
-        job.update(state="error", error=str(error))
+    with _slots:
+        job["state"] = "running"
+        try:
+            harness.run_tests(example_ids=[job["example_id"]], repetitions=job["repetitions"])
+            job["state"] = "done"
+        except Exception as error:  # noqa: BLE001 - surface it in the UI instead of killing the server
+            log.exception("run %s failed", run_id)
+            job.update(state="error", error=str(error))
 
 
 @app.post("/api/runs")

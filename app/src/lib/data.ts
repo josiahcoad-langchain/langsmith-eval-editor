@@ -413,6 +413,16 @@ export async function fetchResults(datasetId: string, exampleId: string, testNam
 // repetition. flaky: anything in between. error: every run raised (e.g. an incomplete test). none: never run.
 export type TestStatus = 'pass' | 'fail' | 'flaky' | 'error' | 'none';
 
+// A test's newest run, as the list needs it. `costPerRun` is that experiment's LangSmith-priced agent cost divided
+// by its runs (the agent's model calls only: graders trace elsewhere); null when the test has never been priced.
+export type TestSummary = { status: TestStatus; costPerRun: number | null };
+
+function summaryOf(experiment: Json): TestSummary {
+  const cost = typeof experiment.total_cost === 'number' ? experiment.total_cost : null;
+  const runs = typeof experiment.run_count === 'number' && experiment.run_count > 0 ? experiment.run_count : null;
+  return { status: statusOf(experiment), costPerRun: cost !== null && runs !== null && cost > 0 ? cost / runs : null };
+}
+
 function statusOf(experiment: Json): TestStatus {
   const errorRate = typeof experiment.error_rate === 'number' ? experiment.error_rate : 0;
   if (errorRate >= 1) return 'error';
@@ -433,11 +443,11 @@ function statusOf(experiment: Json): TestStatus {
 export async function fetchStatuses(
   datasetId: string,
   exampleIds: string[],
-  onPage: (statuses: Record<string, TestStatus>) => void,
-): Promise<Record<string, TestStatus>> {
+  onPage: (summaries: Record<string, TestSummary>) => void,
+): Promise<Record<string, TestSummary>> {
   const wanted = new Set(exampleIds);
   const newest: Record<string, Json> = {};
-  const statuses = () => Object.fromEntries(Object.entries(newest).map(([id, experiment]) => [id, statusOf(experiment)]));
+  const statuses = () => Object.fromEntries(Object.entries(newest).map(([id, experiment]) => [id, summaryOf(experiment)]));
   for (let offset = 0; ; offset += STATUS_PAGE) {
     const page = await callLangSmith<unknown>('GET /api/v1/sessions', {
       params: {
@@ -456,7 +466,8 @@ export async function fetchStatuses(
     if (allFound || experiments.length < STATUS_PAGE) break;
   }
   // Every test not found on any page has never run.
-  return { ...Object.fromEntries([...wanted].map((id) => [id, 'none' as TestStatus])), ...statuses() };
+  const never: TestSummary = { status: 'none', costPerRun: null };
+  return { ...Object.fromEntries([...wanted].map((id) => [id, never])), ...statuses() };
 }
 
 const STATUS_PAGE = 100;
