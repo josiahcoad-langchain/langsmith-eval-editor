@@ -31,6 +31,8 @@ server/
   mocks.py        test mocks, applied as LangChain middleware; strict replay
   checks.py       code checks (deterministic assertions)
   harness.py      runs tests via langsmith.evaluate: repetitions, judge, code checks
+  suite.py        the pytest-like layer: selection, markers, verdicts, summary, JUnit
+  cli.py          runs tests from the command line, like pytest
   seed.py         creates the dataset with four starter tests
   main.py         FastAPI: serves the web build, proxies the LangSmith API, runs tests, receives the webhook
   run_queue.py    custom-app mode: reads run requests from a Context Hub prompt repo
@@ -65,7 +67,36 @@ To populate **Import** (turn a real run into a test), run the agent a few times;
 cd server && uv run python demo_agent.py "Where is my order A1002?"
 ```
 
-From the command line, `uv run python harness.py [test names] -r 3` runs tests without the UI. `uv run pytest` tests the mocks, code checks and harness.
+From the command line, `cli.py` runs tests the way you run pytest (`uv run pytest` tests the editor's own code):
+
+```bash
+uv run python cli.py                               # every test
+uv run python cli.py refund-service-down           # by name
+uv run python cli.py -k refund                     # names containing "refund" ("not refund" excludes)
+uv run python cli.py --tag gate                    # tests tagged "gate" (metadata.tags), like pytest -m
+uv run python cli.py --lf                          # only tests whose newest result failed, was flaky or errored
+uv run python cli.py --tag gate --junit out.xml    # CI: JUnit report, exit code 1 on any failure
+```
+
+```
+collected 81 tests, selected 4 · 1 repetition each · 4 at a time
+SKIPPED   scope_billing_discount_escalates  (mocks get_billing_info, which the agent no longer has)
+XFAILED   max-context-cap  0/1 · expected: every model call sends ~158k tokens (fix pending)
+PASSED    grounded_own_plan_detail  1/1 · 13s
+PASSED    grounded_platform_api_limit  1/1 · 13s
+======== 2 passed, 1 skipped, 1 xfailed in 14s ========
+```
+
+Markers live in each test's metadata, as in pytest:
+
+| Marker | Effect |
+|---|---|
+| `tags: ["gate", ...]` | Select with `--tag`. |
+| `skip: "reason"` | Not run; reported with the reason. |
+| `xfail: "reason"` | Expected to fail. If it **passes**, the suite fails (strict), so the marker gets removed once the agent is fixed. |
+| `pass_threshold: 0.67` | The fraction of repetitions that must pass. The default 1.0 means all of them. |
+
+Exit codes follow pytest: 0 all passed, 1 something failed (including an xfail that passed), 5 nothing selected.
 
 ## How a test runs
 

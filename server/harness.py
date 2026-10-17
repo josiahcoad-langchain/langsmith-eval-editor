@@ -25,7 +25,6 @@ the test, not the agent, is what needs fixing.
 
 from __future__ import annotations
 
-import argparse
 import json
 import os
 from concurrent.futures import ThreadPoolExecutor
@@ -41,6 +40,7 @@ load_dotenv()
 from agent_hook import load_hook  # noqa: E402
 from checks import run_checks  # noqa: E402
 from mocks import MockTools  # noqa: E402
+from suite import Repetition  # noqa: E402
 
 hook = load_hook()  # after load_dotenv: the agent reads its model settings at import
 
@@ -206,11 +206,29 @@ def test_name(example) -> str:
 
 def run_test(example, repetitions: int = 3, client: Client | None = None) -> str:
     """Runs one test `repetitions` times as one experiment and returns the experiment's name."""
+    return _evaluate(example, repetitions, client).experiment_name
+
+
+def run_test_repetitions(example, repetitions: int = 3, client: Client | None = None) -> tuple[str, list[Repetition]]:
+    """Runs one test and returns its experiment's name and each repetition's error and scores (for cli.py)."""
+    results = _evaluate(example, repetitions, client)
+    reps = []
+    for row in results:
+        graded = (row.get("evaluation_results") or {}).get("results") or []
+        error = row["run"].error
+        reps.append(Repetition(
+            error=error.split("\n\nTraceback")[0] if error else None,
+            scores={r.key: r.score for r in graded},
+            comments={r.key: r.comment or "" for r in graded},
+        ))
+    return results.experiment_name, reps
+
+
+def _evaluate(example, repetitions: int, client: Client | None):
     name = test_name(example)
-    results = evaluate(target, data=[example], evaluators=[assertions, code_checks], client=client,
-                       num_repetitions=repetitions, max_concurrency=repetitions, experiment_prefix=name,
-                       metadata={"test": name, "example_id": str(example.id), "repetitions": repetitions})
-    return results.experiment_name
+    return evaluate(target, data=[example], evaluators=[assertions, code_checks], client=client,
+                    num_repetitions=repetitions, max_concurrency=repetitions, experiment_prefix=name,
+                    metadata={"test": name, "example_id": str(example.id), "repetitions": repetitions})
 
 
 def run_tests(example_ids: list[str] | None = None, names: list[str] | None = None, repetitions: int = 3) -> list[str]:
@@ -223,9 +241,6 @@ def run_tests(example_ids: list[str] | None = None, names: list[str] | None = No
 
 
 if __name__ == "__main__":
-    ap = argparse.ArgumentParser()
-    ap.add_argument("names", nargs="*", help="test names (default: all)")
-    ap.add_argument("-r", "--repetitions", type=int, default=3)
-    args = ap.parse_args()
-    for experiment in run_tests(names=args.names or None, repetitions=args.repetitions):
-        print("experiment:", experiment)
+    # Kept for old habits; cli.py is the full runner (-k, --tag, --lf, markers, exit codes, JUnit).
+    import cli
+    raise SystemExit(cli.main())
