@@ -41,3 +41,37 @@ def test_build_evidence_carries_the_given_and_the_run():
     assert built["given"]["context"] == {"tier": "gold"}
     assert len(built["given"]["history_tail"]) == 6
     assert set(built) == {"given", "answer", "tool_calls", "transcript"}
+
+
+def test_what_the_agent_wrote_survives_and_bulky_tool_results_are_trimmed_first():
+    # Given a bulk edit: big read results (12 full posts, twice) and an update whose captions are what's graded
+    post = {"id": "p", "caption": "Thank you for a wonderful season. " * 20}
+    caption = "Thank you for a wonderful season. Book now.\n\n#LanternRow #FingerLakes #WineTourism #ThankYou"
+    update = {"name": "update_posts", "args": {"items": [{"post_id": f"p{i}", "caption": caption} for i in range(12)]},
+              "result": {"updated": 12}}
+    # Different pages, so they can't be collapsed as repeats and something really has to be trimmed
+    reads = [{"name": "list_posts", "args": {"page": n}, "result": {"items": [{**post, "id": f"p{n}-{i}"} for i in range(12)]}}
+             for n in range(4)]
+    transcript = [{"role": "tool", "content": json.dumps({"items": [post] * 12})} for _ in range(4)]
+    outputs = {"answer": "Updated all 12.", "tool_calls": [*reads, update], "transcript": transcript}
+
+    # When it's fitted under a limit the raw evidence is far over
+    evidence = build_evidence({}, outputs, 20_000)
+
+    # Then every caption the agent wrote is intact, and the trimming happened in the read results
+    written = evidence["tool_calls"][-1]["args"]["items"]
+    assert [item["caption"] for item in written] == [caption] * 12
+    assert "trimmed" in json.dumps(evidence["tool_calls"][0]["result"])
+    # and the transcript doesn't repeat what tool_calls already carries
+    assert all("tool_calls" in row["content"] for row in evidence["transcript"])
+
+
+def test_a_result_repeated_word_for_word_is_shown_once():
+    same = {"items": [{"id": "p1", "caption": "x" * 500}]}
+    outputs = {"answer": "ok", "transcript": [], "tool_calls": [
+        {"name": "list_posts", "args": {}, "result": same},
+        {"name": "list_posts", "args": {}, "result": same},
+    ]}
+    evidence = build_evidence({}, outputs, 1_000_000)
+    assert evidence["tool_calls"][0]["result"] == same
+    assert evidence["tool_calls"][1]["result"] == "[same result as tool_calls[0]]"

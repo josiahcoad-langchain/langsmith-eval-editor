@@ -51,7 +51,10 @@ hook = load_hook()  # after load_dotenv: the agent reads its model settings at i
 
 DATASET_NAME = os.environ.get("EVAL_DATASET", "eval-editor-demo")
 JUDGE_MODEL = os.environ.get("JUDGE_MODEL", "anthropic:claude-sonnet-5-5")
-EVIDENCE_LIMIT = 60_000
+# Characters of evidence a grader sees (~50k tokens). Generous on purpose: judges read 1M tokens, Luna reads 50k for
+# about half a cent, and every cut risks hiding what an assertion is about. At 60k, a 16-call bulk edit lost the
+# original captions a judge needed to confirm "only hashtags were added".
+EVIDENCE_LIMIT = 200_000
 
 
 def _transcript(messages: list[BaseMessage]) -> list[dict]:

@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Spinner } from '@langchain/macaw-components/Spinner';
 import { Text } from '@langchain/macaw-components/Text';
-import { callLangSmith, duration, errorMessage, fetchResults, isRecord, shortDate, text, type Example, type TestResult } from '../lib/data';
+import { duration, errorMessage, fetchResults, isRecord, openTrace, shortDate, text, type Example, type TestResult } from '../lib/data';
 import { fetchPending, type PendingRun } from '../runs';
 
 type ExperimentGroup = { experimentId: string; experimentName: string; start: string; runs: TestResult[] };
@@ -68,12 +68,9 @@ export function ResultsPanel({ datasetId, example, workspaceId, onClose }: { dat
     };
   }, [datasetId, example.id]);
 
-  const openTrace = async (result: TestResult) => {
+  const showTrace = async (result: TestResult) => {
     try {
-      const { url } = (await callLangSmith<{ url: string }>(`GET /api/v2/runs/${result.runId}/url`, {
-        params: { project_id: result.experimentId, trace_id: result.traceId },
-      })) ?? { url: '' };
-      if (url) window.langsmith.openUrl(url, { newTab: true });
+      await openTrace(result);
     } catch (err) {
       setError(errorMessage(err));
     }
@@ -173,7 +170,7 @@ export function ResultsPanel({ datasetId, example, workspaceId, onClose }: { dat
                           {openAnswer === result.runId ? 'Hide answer' : 'Answer'}
                         </button>
                       ) : null}
-                      <button type="button" className="text-secondary underline hover:text-primary" onClick={() => void openTrace(result)}>Trace</button>
+                      <button type="button" className="text-secondary underline hover:text-primary" onClick={() => void showTrace(result)}>Trace</button>
                     </div>
                     {result.error ? <Text variant="xs" color="error">{result.error}</Text> : null}
                     {result.traceback ? (

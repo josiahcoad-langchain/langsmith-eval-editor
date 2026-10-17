@@ -763,3 +763,11 @@ export function withFiles(example: Example, files: TestFile[]): Example {
   const { attachments: _old, ...inputs } = example.inputs;
   return { ...example, inputs: files.length ? { ...inputs, attachments: files } : inputs };
 }
+
+// Opens one run's trace in LangSmith (a new tab), from the Results panel or a drill-down repetition.
+export async function openTrace(result: Pick<TestResult, 'runId' | 'experimentId' | 'traceId'>) {
+  const response = await callLangSmith<{ url: string }>(`GET /api/v2/runs/${result.runId}/url`, {
+    params: { project_id: result.experimentId, trace_id: result.traceId },
+  });
+  if (response?.url) window.langsmith.openUrl(response.url, { newTab: true });
+}

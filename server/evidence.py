@@ -8,6 +8,12 @@ reply because the evidence "shows no update results to verify".
 Fitting instead caps the LONGEST strings, a little more each pass, until the whole thing fits. Every field, every
 tool call and every short value survives; only bulky text (a long caption list, a scraped page) is trimmed, and it
 says so where it was trimmed.
+
+And it trims in order of how little the grade depends on it: tool RESULTS first (data the agent read, often a
+dozen full posts, repeated), then the transcript, and what the agent itself wrote (its reply, the arguments it
+called tools with) only if that still isn't enough. Trimming everything alike once cut the middle out of every new
+caption in a bulk edit, so no judge could check "changed nothing else". The transcript's tool messages are not
+repeated either: their content is each call's result, which `tool_calls` already carries.
 """
 
 from __future__ import annotations
@@ -24,20 +30,67 @@ def build_evidence(inputs: dict, outputs: dict, limit: int) -> dict[str, Any]:
     given: dict[str, Any] = {"context": inputs.get("context") or {}}
     if inputs.get("history"):
         given["history_tail"] = inputs["history"][-GIVEN_HISTORY_TURNS:]
-    evidence = {"given": given, **{key: outputs.get(key) for key in ("answer", "tool_calls", "transcript")}}
+    transcript = [_without_tool_output(row) for row in outputs.get("transcript") or []] if outputs.get("tool_calls") else outputs.get("transcript")
+    evidence = {"given": given, "answer": outputs.get("answer"), "tool_calls": _once_each(outputs.get("tool_calls")),
+                "transcript": transcript}
     return fit_evidence(evidence, limit)
+
+
+def _once_each(calls: list[dict] | None) -> list[dict] | None:
+    """A result identical to an earlier call's is replaced by a pointer to it: agents re-read the same list, and a
+    repeat adds size without adding anything a judge could use."""
+    if not calls:
+        return calls
+    seen: dict[str, int] = {}
+    out = []
+    for index, call in enumerate(calls):
+        key = json.dumps(call.get("result"), sort_keys=True, default=str) if "result" in call else None
+        if key is not None and len(key) > 200 and key in seen:
+            out.append({**call, "result": f"[same result as tool_calls[{seen[key]}]]"})
+            continue
+        if key is not None:
+            seen.setdefault(key, index)
+        out.append(call)
+    return out
+
+
+def _without_tool_output(row: dict) -> dict:
+    if row.get("role") != "tool":
+        return row
+    return {**row, "content": "[this tool's result is in tool_calls]"}
 
 
 def fit_evidence(evidence: dict[str, Any], limit: int) -> dict[str, Any]:
     if _size(evidence) <= limit:
         return evidence
+    # Least needed first: what tools returned, then the transcript, then everything (the agent's own words last).
+    for trim in (_trim_results, _trim_transcript, _cap_strings):
+        fitted = _shrink(evidence, limit, trim)
+        if fitted is not None:
+            return fitted
+    return _cap_strings(evidence, 40)
+
+
+def _shrink(evidence: dict[str, Any], limit: int, trim: Any) -> dict[str, Any] | None:
+    """The least-trimmed version `trim` can make that fits, or None if it can't fit by trimming only its part."""
     cap = max(len(s) for s in _strings(evidence))
     while cap > 40:
         cap = int(cap * 0.7)
-        fitted = _cap_strings(evidence, cap)
+        fitted = trim(evidence, cap)
         if _size(fitted) <= limit:
             return fitted
-    return _cap_strings(evidence, 40)
+    return None
+
+
+def _trim_results(evidence: dict[str, Any], cap: int) -> dict[str, Any]:
+    calls = [{**call, "result": _cap_strings(call.get("result"), cap)} if "result" in call else call
+             for call in evidence.get("tool_calls") or []]
+    return {**evidence, "tool_calls": calls}
+
+
+def _trim_transcript(evidence: dict[str, Any], cap: int) -> dict[str, Any]:
+    trimmed = _trim_results(evidence, cap)
+    return {**trimmed, "transcript": _cap_strings(trimmed.get("transcript"), cap)}
 
 
 def _size(value: Any) -> int:

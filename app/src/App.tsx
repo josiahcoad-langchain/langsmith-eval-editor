@@ -3,7 +3,6 @@ import { Button } from '@langchain/macaw-components/Button';
 import { Card } from '@langchain/macaw-components/Card';
 import { Spinner } from '@langchain/macaw-components/Spinner';
 import { Text } from '@langchain/macaw-components/Text';
-import { DATASET_NAME } from './config';
 import { fieldClass, RemoveButton, Section, Subsection, TextAreaField, TextField } from './components/fields';
 import { ActionsMenu } from './components/ActionsMenu';
 import { contentHash } from './lib/contentHash';
@@ -484,9 +483,7 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
     <main className="flex h-screen flex-col gap-space-4 overflow-hidden bg-surface-level-1 p-space-4 text-primary">
       <header className="flex flex-col">
         <Text variant="h1">Agent tests</Text>
-        <Text variant="sm" color="secondary">
-          Given (context, history, mocked tools) · When (prompt) · Assert (assertions and code checks). Tests autosave to the {DATASET_NAME} dataset.
-        </Text>
+        
       </header>
 
       <div className={`grid min-h-0 flex-1 gap-space-4 ${showResults && selected && !selected.isNew ? 'grid-cols-[260px_minmax(0,1fr)_360px]' : 'grid-cols-[260px_minmax(0,1fr)]'}`}>

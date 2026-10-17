@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Button } from '@langchain/macaw-components/Button';
 import { Spinner } from '@langchain/macaw-components/Spinner';
-import { errorMessage, fetchLabels, fetchReasons, fetchResults, saveLabel, shortDate, text, type Json, type Label, type TestResult } from '../lib/data';
+import { errorMessage, fetchLabels, fetchReasons, fetchResults, openTrace, saveLabel, shortDate, text, type Json, type Label, type TestResult } from '../lib/data';
 import { isWeb, requestRegrade, type Regrade } from '../runs';
 import { Markdown } from './Markdown';
 
@@ -80,6 +80,8 @@ export function AssertionDrilldown({ datasetId, exampleId, testName, name, kind,
               {run.error ? <span className="text-error-primary">errored</span> : grade ? (
                 <span className={passed ? 'text-success-primary' : 'text-error-primary'}>{passed ? '✓ passed' : grade.score === null ? '? undecided' : '✗ failed'}</span>
               ) : <span className="text-tertiary">not graded</span>}
+              <button type="button" className="ml-auto text-xs text-brand-primary underline-offset-2 hover:underline"
+                onClick={() => void openTrace(run).catch(() => undefined)}>Trace</button>
             </div>
             {reasons[run.runId] || grade?.comment ? (
               <span className="text-secondary"><span className="text-tertiary">Judge: </span>{reasons[run.runId] || grade?.comment}</span>
