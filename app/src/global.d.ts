@@ -3,6 +3,8 @@ export {};
 declare global {
   /** Metadata supplied as render()'s third argument by the host. */
   type RenderMetadata = {
+    // Web mode only: the commit the agent under test is on, to flag results from older agent code.
+    agentCommit?: string;
     mode: 'dark' | 'light';
     /** Empty when the workspace is unresolved. */
     workspaceId: string;

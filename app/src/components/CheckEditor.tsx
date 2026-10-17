@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react';
 import { RemoveButton, TextAreaField, TextField, fieldClass } from './fields';
 import { CHECK_TYPES, checkProblem, type Check } from '../lib/data';
 
@@ -52,7 +53,9 @@ function ToolGroups({ groups, tools, anyOf, onChange }: { groups: string[][]; to
 }
 
 // One code check: a name (its feedback key), a type, and that type's params.
-export function CheckEditor({ check, tools, onChange, onRemove }: { check: Check; tools: string[]; onChange: (patch: Partial<Check>) => void; onRemove: () => void }) {
+export function CheckEditor({ check, tools, onChange, onRemove, result }: {
+  check: Check; tools: string[]; onChange: (patch: Partial<Check>) => void; onRemove: () => void; result?: ReactNode;
+}) {
   const problem = checkProblem(check);
   const max = <TextField label="Max" value={check.max} onChange={(value) => onChange({ max: value })} placeholder="3" mono />;
   return (
@@ -66,6 +69,7 @@ export function CheckEditor({ check, tools, onChange, onRemove }: { check: Check
           {!(CHECK_TYPES as readonly string[]).includes(check.type) ? <option value={check.type}>{check.type}</option> : null}
         </select>
         <div className="flex-1" />
+        {result}
         <RemoveButton label={`Remove check ${check.name}`} onClick={onRemove} />
       </div>
       <span className="text-xs text-tertiary">{HINTS[check.type] ?? HINTS.custom}</span>

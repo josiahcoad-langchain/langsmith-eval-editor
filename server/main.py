@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 import os
+import subprocess
 import threading
 import uuid
 from datetime import datetime, timezone
@@ -64,7 +65,17 @@ def config() -> dict:
     # https://smith.langchain.com/o/<workspace>/datasets/<id> -> the workspace's base URL and ID
     web, _, rest = _dataset_url.partition("/o/")
     workspace_id = rest.split("/")[0]
-    return {"host": web, "workspaceId": workspace_id, "dataset": harness.DATASET_NAME}
+    return {"host": web, "workspaceId": workspace_id, "dataset": harness.DATASET_NAME, "agentCommit": _agent_commit()}
+
+
+def _agent_commit() -> str:
+    """The commit the agent under test is on (the server runs from its checkout), so the UI can tell a result
+    produced by older agent code from a current one. Experiments record the commit they ran on, the same way."""
+    try:
+        head = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return ""
+    return head
 
 
 # --- Runs (standalone) --------------------------------------------------------------------------------

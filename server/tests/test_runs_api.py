@@ -27,4 +27,11 @@ def test_runs_are_capped_and_the_rest_queue(monkeypatch):
     assert len(started) == 10
     assert states.count("running") == main.MAX_PARALLEL_TESTS
     assert states.count("queued") == 10 - main.MAX_PARALLEL_TESTS
+
+    # Drain every job while the fake harness is still patched in; otherwise the queued ones run the real
+    # harness after the test ends and call LangSmith.
     release.set()
+    deadline = time.time() + 5
+    while time.time() < deadline and any(main._runs[job["id"]]["state"] != "done" for job in started):
+        time.sleep(0.05)
+    assert all(main._runs[job["id"]]["state"] == "done" for job in started)

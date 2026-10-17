@@ -8,7 +8,7 @@ import { HostTheme } from './lib/HostTheme';
 import { ErrorBoundary } from './lib/ErrorBoundary';
 import { enableWebRunner } from './runs';
 
-type Config = { host: string; workspaceId: string };
+type Config = { host: string; workspaceId: string; agentCommit?: string };
 
 async function call(operation: string, args?: { params?: Record<string, string | string[]>; body?: unknown }) {
   const [method, path] = operation.split(' ');
@@ -67,7 +67,7 @@ function Root({ config }: { config: Config }) {
   return (
     <HostTheme mode={mode}>
       <ErrorBoundary>
-        <App data={{}} metadata={{ mode, workspaceId: config.workspaceId, host: config.host }} />
+        <App data={{}} metadata={{ mode, workspaceId: config.workspaceId, host: config.host, agentCommit: config.agentCommit }} />
       </ErrorBoundary>
     </HostTheme>
   );

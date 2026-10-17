@@ -1,18 +1,19 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Button } from '@langchain/macaw-components/Button';
 import { Card } from '@langchain/macaw-components/Card';
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from '@langchain/macaw-components/DropdownMenu';
 import { Spinner } from '@langchain/macaw-components/Spinner';
 import { Text } from '@langchain/macaw-components/Text';
-import { DotsThreeIcon } from '@phosphor-icons/react/dist/csr/DotsThree';
 import { DATASET_NAME } from './config';
 import { fieldClass, RemoveButton, Section, Subsection, TextAreaField, TextField } from './components/fields';
+import { ActionsMenu } from './components/ActionsMenu';
+import { LastRun } from './components/LastRun';
+import { ResultChip } from './components/ResultChip';
 import { CheckEditor } from './components/CheckEditor';
 import { HistoryEditor } from './components/HistoryEditor';
 import { MockToolEditor } from './components/MockToolEditor';
 import { ResultsPanel } from './components/ResultsPanel';
 import {
-  contextProblem, countToolCalls, deleteExample, emptyCheck, emptyExample, errorMessage, fetchAllExamples, fetchDataset, fetchPastRuns, fetchStatuses, importTrace,
+  contextProblem, countToolCalls, deleteExample, emptyCheck, emptyExample, errorMessage, fetchAllExamples, fetchDataset, fetchPastRuns, fetchStatuses, importTrace, staleness,
   isDirty, keyId, saveExampleTo, shortDate, text, toDraft, toPayload, traceIdFrom,
   type Dataset, type Draft, type Example, type PastRun, type TestStatus, type TestSummary,
 } from './lib/data';
@@ -36,13 +37,15 @@ const STATUS_DOT: Record<ListStatus, { glyph: string; color: string; label: stri
   none: { glyph: '○', color: 'text-tertiary', label: 'Never run' },
 };
 
-function StatusDot({ status }: { status: ListStatus }) {
+// An out-of-date result keeps its colour but fades, so "was green, has since changed" reads differently from "green".
+function StatusDot({ status, stale = false }: { status: ListStatus; stale?: boolean }) {
   const dot = STATUS_DOT[status];
-  return <span className={`w-3 shrink-0 text-center font-bold ${dot.color}`} title={dot.label} aria-label={dot.label}>{dot.glyph}</span>;
+  const label = stale ? `Out of date (changed since this run). ${dot.label}` : dot.label;
+  return <span className={`w-3 shrink-0 text-center font-bold ${dot.color} ${stale ? 'opacity-40' : ''}`} title={label} aria-label={label}>{dot.glyph}</span>;
 }
 
-function RailButton({ active, title, subtitle, badge, status, onClick }: {
-  active: boolean; title: string; subtitle: string; badge?: string; status?: ListStatus; onClick: () => void;
+function RailButton({ active, title, subtitle, badge, status, stale = false, onClick }: {
+  active: boolean; title: string; subtitle: string; badge?: string; status?: ListStatus; stale?: boolean; onClick: () => void;
 }) {
   return (
     <button
@@ -54,7 +57,7 @@ function RailButton({ active, title, subtitle, badge, status, onClick }: {
     >
       <span className="flex items-center justify-between gap-space-2">
         <span className="flex min-w-0 items-center gap-space-1">
-          {status ? <StatusDot status={status} /> : null}
+          {status ? <StatusDot status={status} stale={stale} /> : null}
           <span className="truncate font-mono font-medium">{title}</span>
         </span>
         {badge ? <span className="shrink-0 text-xs text-tertiary">{badge}</span> : null}
@@ -294,6 +297,9 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
   };
 
   const savedExamples = examples.filter((e) => !e.isNew);
+  const selectedStale = selected && !selected.isNew
+    ? (dirty ? 'the test has unsaved edits' : staleness(summaries[selected.id], selected, metadata?.agentCommit))
+    : null;
   const failingExamples = savedExamples.filter((e) => ['fail', 'flaky', 'error'].includes(summaries[e.id]?.status ?? ''));
   const batchFor = (which: 'all' | 'failing') => (which === 'all' ? savedExamples : failingExamples);
 
@@ -434,6 +440,7 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
               subtitle={exampleDraft?.description || `${count} assertions`}
               badge={example.isNew ? 'new' : dirtyIds.has(example.id) ? '● unsaved' : `${count} asserts`}
               status={example.isNew ? undefined : activeRuns[example.id] ?? summaries[example.id]?.status}
+              stale={!activeRuns[example.id] && staleness(summaries[example.id], example, metadata?.agentCommit) !== null}
               onClick={() => select(example.id)}
             />
           );
@@ -479,6 +486,10 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
                       ? `Not saved: ${built.error}`
                       : notice?.text ?? (saving ? 'Saving…' : dirty ? 'Unsaved changes…' : 'All changes saved')}
                   </Text>
+                  {!selected.isNew ? (
+                    <LastRun summary={summaries[selected.id]} onOpen={() => setShowResults(true)}
+                      stale={dirty ? 'the test has unsaved edits' : staleness(summaries[selected.id], selected, metadata?.agentCommit)} />
+                  ) : null}
                 </div>
                 <div className="flex flex-wrap gap-space-2">
                   {!selected.isNew && metadata?.workspaceId ? (
@@ -493,18 +504,10 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
                       <Button size="sm" variant="outlined" color="secondary" onClick={() => setConfirmDelete(false)}>Cancel</Button>
                     </>
                   ) : (
-                    <DropdownMenu>
-                      <DropdownMenuTrigger asChild>
-                        <button type="button" aria-label="Test actions" className="inline-flex size-8 items-center justify-center rounded-md border border-default text-secondary hover:bg-surface-level-2 hover:text-primary">
-                          <DotsThreeIcon size={18} weight="bold" />
-                        </button>
-                      </DropdownMenuTrigger>
-                      <DropdownMenuContent align="end">
-                        <DropdownMenuItem onSelect={() => addExample(draft)}>Duplicate</DropdownMenuItem>
-                        <DropdownMenuSeparator />
-                        <DropdownMenuItem className="text-error-primary" disabled={saving} onSelect={() => setConfirmDelete(true)}>Delete…</DropdownMenuItem>
-                      </DropdownMenuContent>
-                    </DropdownMenu>
+                    <ActionsMenu label="Test actions" items={[
+                      { label: 'Duplicate', onSelect: () => addExample(draft) },
+                      { label: 'Delete…', danger: true, disabled: saving, onSelect: () => setConfirmDelete(true) },
+                    ]} />
                   )}
                 </div>
               </div>
@@ -557,6 +560,7 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
                     <div className="flex items-center gap-space-2">
                       <div className="w-64"><TextField value={row.name} onChange={(name) => patchRow('assertions', row.key, { name: name.toLowerCase().replace(/[\s_]+/g, '-') })} placeholder="assertion-name" mono /></div>
                       <div className="flex-1" />
+                      <ResultChip result={summaries[selected.id]?.keys[row.name]} ranAt={summaries[selected.id]?.ranAt ?? ''} stale={selectedStale} onOpen={() => setShowResults(true)} />
                       <RemoveButton label={`Remove assertion ${row.name}`} onClick={() => removeRow('assertions', row.key)} />
                     </div>
                     <TextAreaField value={row.assertion} onChange={(assertion) => patchRow('assertions', row.key, { assertion })} rows={2} placeholder="It tells the customer the refund could not be processed right now." />
@@ -571,7 +575,8 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
                   addLabel="Add check" onAdd={() => patchDraft({ checks: [...draft.checks, emptyCheck()] })}>
                   {draft.checks.length === 0 ? <Text variant="xs" color="tertiary">None.</Text> : null}
                   {draft.checks.map((check) => (
-                    <CheckEditor key={check.key} check={check} tools={tools} onChange={(patch) => patchRow('checks', check.key, patch)} onRemove={() => removeRow('checks', check.key)} />
+                    <CheckEditor key={check.key} check={check} tools={tools} onChange={(patch) => patchRow('checks', check.key, patch)} onRemove={() => removeRow('checks', check.key)}
+                      result={<ResultChip result={summaries[selected.id]?.keys[check.name]} ranAt={summaries[selected.id]?.ranAt ?? ''} stale={selectedStale} onOpen={() => setShowResults(true)} />} />
                   ))}
                 </Subsection>
               </Section>

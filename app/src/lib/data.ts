@@ -4,7 +4,8 @@ import { DATASET_NAME, TRACE_PROJECT } from '../config';
 
 export type Json = Record<string, unknown>;
 
-export type Example = { id: string; inputs: Json; outputs: Json; metadata: Json; isNew?: boolean };
+// `modifiedAt` is when the test last changed, to tell a result produced by an older version of it from a current one.
+export type Example = { id: string; inputs: Json; outputs: Json; metadata: Json; isNew?: boolean; modifiedAt?: string };
 // A mock is one response for any arguments, or (cases set) the first case whose `when` matches the call's arguments.
 // `anyValue` is the other matcher: the case applies when any argument equals that string (`when_any_value`).
 export type MockCase = { key: string; when: string; response: string; anyValue?: string };
@@ -78,6 +79,7 @@ function toExample(raw: unknown): Example | null {
     inputs: isRecord(raw.inputs) ? raw.inputs : {},
     outputs: isRecord(raw.outputs) ? raw.outputs : {},
     metadata: isRecord(raw.metadata) ? raw.metadata : {},
+    modifiedAt: text(raw.modified_at) || text(raw.created_at),
   };
 }
 
@@ -101,7 +103,8 @@ export async function saveExampleTo(datasetId: string, example: Example, payload
     return toExample(response) ?? { id: example.id, ...payload };
   }
   await callLangSmith(`PATCH /api/v1/examples/${example.id}`, { body: payload });
-  return { id: example.id, ...payload };
+  // Stamped here rather than re-read, so a result goes out of date the moment the edit is saved.
+  return { id: example.id, ...payload, modifiedAt: new Date().toISOString() };
 }
 
 export async function deleteExample(id: string) {
@@ -415,12 +418,37 @@ export type TestStatus = 'pass' | 'fail' | 'flaky' | 'error' | 'none';
 
 // A test's newest run, as the list needs it. `costPerRun` is that experiment's LangSmith-priced agent cost divided
 // by its runs (the agent's model calls only: graders trace elsewhere); null when the test has never been priced.
-export type TestSummary = { status: TestStatus; costPerRun: number | null };
+// `keys` is each assertion's and check's result on that run (passed of n repetitions), for the chip beside it.
+export type KeyResult = { passed: number; n: number };
+export type TestSummary = {
+  status: TestStatus; costPerRun: number | null; keys: Record<string, KeyResult>; ranAt: string;
+  runs: number; totalCost: number | null; latencyP50: number | null;
+  // The test version the run used (the dataset's version when it started) and the agent commit it ran on.
+  testVersion: string; agentCommit: string;
+};
 
 function summaryOf(experiment: Json): TestSummary {
   const cost = typeof experiment.total_cost === 'number' ? experiment.total_cost : null;
   const runs = typeof experiment.run_count === 'number' && experiment.run_count > 0 ? experiment.run_count : null;
-  return { status: statusOf(experiment), costPerRun: cost !== null && runs !== null && cost > 0 ? cost / runs : null };
+  const keys: Record<string, KeyResult> = {};
+  for (const [key, stat] of Object.entries(isRecord(experiment.feedback_stats) ? experiment.feedback_stats : {})) {
+    if (!isRecord(stat) || typeof stat.n !== 'number' || typeof stat.avg !== 'number') continue;
+    keys[key] = { passed: Math.round(stat.avg * stat.n), n: stat.n };
+  }
+  const extra = isRecord(experiment.extra) ? experiment.extra : {};
+  const metadata = isRecord(extra.metadata) ? extra.metadata : {};
+  const git = isRecord(metadata.git) ? metadata.git : {};
+  return {
+    status: statusOf(experiment),
+    costPerRun: cost !== null && runs !== null && cost > 0 ? cost / runs : null,
+    keys,
+    ranAt: text(experiment.start_time),
+    runs: runs ?? 0,
+    totalCost: cost,
+    latencyP50: typeof experiment.latency_p50 === 'number' ? experiment.latency_p50 : null,
+    testVersion: text(metadata.dataset_version) || text(experiment.start_time),
+    agentCommit: text(git.commit),
+  };
 }
 
 function statusOf(experiment: Json): TestStatus {
@@ -466,11 +494,28 @@ export async function fetchStatuses(
     if (allFound || experiments.length < STATUS_PAGE) break;
   }
   // Every test not found on any page has never run.
-  const never: TestSummary = { status: 'none', costPerRun: null };
+  const never: TestSummary = {
+    status: 'none', costPerRun: null, keys: {}, ranAt: '', runs: 0, totalCost: null, latencyP50: null, testVersion: '', agentCommit: '',
+  };
   return { ...Object.fromEntries([...wanted].map((id) => [id, never])), ...statuses() };
 }
 
 const STATUS_PAGE = 100;
+
+// Why a test's newest result no longer describes it, or null if it still does. A result is out of date when the
+// test was edited after the run (its Given, prompt or assertions are not what was graded), or when the agent's
+// code moved on (web mode knows the current commit; a run records its own).
+export function staleness(summary: TestSummary | undefined, example: Example | undefined, agentCommit?: string): string | null {
+  if (!summary || summary.status === 'none' || !example) return null;
+  const edited = Date.parse(example.modifiedAt ?? '');
+  const ran = Date.parse(summary.testVersion);
+  // A second of slack: the version a run records and the example's own timestamp come from different clocks.
+  if (edited && ran && edited > ran + 1000) return 'the test was edited after this run';
+  if (agentCommit && summary.agentCommit && !summary.agentCommit.startsWith(agentCommit.slice(0, 7))) {
+    return `the agent's code changed since this run (${summary.agentCommit.slice(0, 8)} → ${agentCommit.slice(0, 8)})`;
+  }
+  return null;
+}
 
 // --- Import a past run as a test -----------------------------------------------------------------------------
 

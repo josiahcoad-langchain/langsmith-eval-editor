@@ -1,7 +1,6 @@
 import { useState } from 'react';
 import { Button } from '@langchain/macaw-components/Button';
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from '@langchain/macaw-components/DropdownMenu';
-import { DotsThreeIcon } from '@phosphor-icons/react/dist/csr/DotsThree';
+import { ActionsMenu } from './ActionsMenu';
 import { RemoveButton, TextAreaField, TextField } from './fields';
 import { isRecord, keyId, parseResponse, type Json, type MockCase, type MockTool } from '../lib/data';
 
@@ -113,23 +112,13 @@ function MockToolEditor({ mock, tools, onChange, onRemove }: {
                   <span className="truncate text-xs text-secondary">{preview.text}</span>
                 )}
               </button>
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <button type="button" aria-label="Response actions" className="mr-space-2 inline-flex size-7 items-center justify-center rounded-md text-tertiary hover:bg-surface-level-3 hover:text-primary">
-                    <DotsThreeIcon size={18} weight="bold" />
-                  </button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end">
-                  <DropdownMenuItem onSelect={() => setOpen(isOpen ? null : row.key)}>{isOpen ? 'Close' : 'Edit'}</DropdownMenuItem>
-                  {mock.cases ? (
-                    <>
-                      <DropdownMenuItem onSelect={() => duplicateCase(row.key)}>Duplicate</DropdownMenuItem>
-                      <DropdownMenuSeparator />
-                      <DropdownMenuItem className="text-error-primary" onSelect={() => deleteCase(row.key)}>Delete</DropdownMenuItem>
-                    </>
-                  ) : null}
-                </DropdownMenuContent>
-              </DropdownMenu>
+              <ActionsMenu label="Response actions" compact items={[
+                { label: isOpen ? 'Close' : 'Edit', onSelect: () => setOpen(isOpen ? null : row.key) },
+                ...(mock.cases ? [
+                  { label: 'Duplicate', onSelect: () => duplicateCase(row.key) },
+                  { label: 'Delete', danger: true, onSelect: () => deleteCase(row.key) },
+                ] : []),
+              ]} />
               </div>
               {isOpen ? (
                 <div className="flex flex-col gap-space-2 border-t border-default bg-surface-level-2 p-space-3">
