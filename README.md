@@ -11,7 +11,7 @@ A test editor for LangChain agents, backed by a LangSmith dataset. Tests read li
   - **Assertions**: named one-sentence statements ("It never says or implies that the refund was issued."), graded by an LLM judge against the run.
   - **Code checks**: deterministic checks a judge can't grade from a transcript, such as `must_call`, `max_tool_calls` or `max_prompt_tokens`.
 
-**Run test** runs the real agent against the mocks several times in parallel and logs one LangSmith experiment. **Run all** and **Run failing** run many tests, all at once. The test list works like an IDE's test explorer:
+**Run test** runs the real agent against the mocks several times in parallel and logs one LangSmith experiment. **Run all** and **Run failing** run many tests, 8 at a time. The test list works like an IDE's test explorer:
 
 - **Each test has a status dot** for its newest result: green (passed every repetition), amber (passed some), red (failed every repetition) or a red **!** (the run errored, e.g. an incomplete test).
 - **Each assertion and code check shows its last result** inline (`3/3`, `1/3`, `0/3`).
@@ -82,7 +82,7 @@ uv run python cli.py --tag gate --junit out.xml    # CI: JUnit report, exit code
 ```
 
 ```
-collected 81 tests, selected 4 · 1 repetition each · all at a time
+collected 81 tests, selected 4 · 1 repetition each · 8 at a time
 SKIPPED   scope_billing_discount_escalates  (mocks get_billing_info, which the agent no longer has)
 XFAILED   max-context-cap  0/1 · expected: every model call sends ~158k tokens (fix pending)
 PASSED    grounded_own_plan_detail  1/1 · 13s
@@ -205,7 +205,7 @@ Then set the names in `server/.env` and `app/.env` (copy each `.env.example`): `
 ## Working in the editor
 
 - **Run test / Run all / Run failing.** "Failing" means every test whose newest result is red, amber or errored. Run all and Run failing confirm first, showing the run count and an **estimated cost**: each test's LangSmith-priced cost per repetition on its newest run, times the repetitions chosen. The estimate covers the agent's model calls only (graders trace elsewhere), and tests with no priced run yet are counted separately rather than guessed.
-- **Every test runs at once.** Set `EVAL_PARALLEL=N` (server and CLI; or the CLI's `--parallel N`) when your model provider's rate limit can't take tests × repetitions agent runs together; the server then queues the rest, and the list shows each test as queued or running until its result lands.
+- **8 tests run at a time** (`EVAL_PARALLEL=N` on the server or CLI, or the CLI's `--parallel N`, changes it). Every agent run lives in one process, so "all at once" can exhaust the machine's memory: 81 tests × 3 repetitions of a large agent froze a 32 GB Mac. The server queues the rest, and the list shows each test as queued or running until its result lands.
 - **Status dots** come from the dataset's experiment list, newest first, read only until every test has a status. That's usually one request, however many experiments the dataset has run. They refresh every 30 s, and right away when a run finishes.
 - **Results** lists every run of the selected test, newest first, with each assertion's and check's score and reason per repetition.
 - **Why did it fail?** Click an assertion's or check's result chip. Each repetition of the newest run shows the judge's verdict and reason **beside the agent's reply and tool calls**. Then click **Re-grade**. It grades those same saved replies again, 3 times with each judge the hook offers, without re-running the agent (judges' cost only), and names the cause:

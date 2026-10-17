@@ -31,7 +31,7 @@ type ListStatus = TestStatus | 'queued' | 'running';
 
 const STATUS_DOT: Record<ListStatus, { glyph: string; color: string; label: string }> = {
   running: { glyph: '◐', color: 'text-secondary animate-spin', label: 'Running now' },
-  queued: { glyph: '◌', color: 'text-tertiary', label: 'Queued: waits for a free slot (EVAL_PARALLEL caps how many tests run at once)' },
+  queued: { glyph: '◌', color: 'text-tertiary', label: 'Queued: waits for a free slot (8 tests run at a time; EVAL_PARALLEL changes it)' },
   pass: { glyph: '●', color: 'text-success-primary', label: 'Newest run: every assertion and check passed on every repetition' },
   fail: { glyph: '●', color: 'text-error-primary', label: 'Newest run: something failed on every repetition' },
   flaky: { glyph: '●', color: 'text-warning-primary', label: 'Newest run: passed on some repetitions and failed on others' },
@@ -395,7 +395,7 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
         <div className="flex flex-col gap-space-1 rounded-md border border-default p-space-2 text-xs text-secondary">
           <span>
             Run {batchFor(confirmBatch).length} test{batchFor(confirmBatch).length === 1 ? '' : 's'} × {repetitions} repetition{repetitions === 1 ? '' : 's'}
-            {' '}= {batchFor(confirmBatch).length * repetitions} agent runs, all at once?
+            {' '}= {batchFor(confirmBatch).length * repetitions} agent runs, 8 tests at a time?
           </span>
           {(() => {
             const { dollars, unpriced } = estimate(batchFor(confirmBatch));

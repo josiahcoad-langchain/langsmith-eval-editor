@@ -13,7 +13,7 @@ A Given / When / Assert test editor for an agent, over one LangSmith dataset (de
   - Status dots, last-run line and cost: `fetchStatuses` reads the experiment list with `include_stats`.
   - `staleness`, and Import from the trace project.
 - `src/runs.ts`: Run test, Run all, Run failing.
-  - Web: `POST /api/runs` on the server, which runs every test at once (EVAL_PARALLEL caps it), and `GET /api/runs` for queued and running tests.
+  - Web: `POST /api/runs` on the server, which runs 8 tests at a time (EVAL_PARALLEL changes it), and `GET /api/runs` for queued and running tests.
   - Custom app: one commit per test to the prompt repo `eval-editor-run-requests` (template = `key: value` lines; each commit names the latest as `parent_commit`, retried once on a race), which a prompt webhook turns into a server run.
 - `src/web.tsx`: a `window.langsmith` shim over the server's `/api/langsmith/*` proxy, plus light/dark from `prefers-color-scheme`. `/api/config` also reports `agentCommit`.
 - `src/components/`:

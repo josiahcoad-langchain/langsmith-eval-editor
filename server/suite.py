@@ -27,6 +27,11 @@ VERDICTS = ("failed", "error", "passed", "skipped", "xfailed", "xpassed")
 _BAD = {"failed", "error", "xpassed"}
 
 
+# Tests run at once (server and CLI; EVAL_PARALLEL overrides). Not "all": every agent run lives in one process, and
+# on 2026-10-17 starting every test together (81 tests x 3 repetitions of a 37-middleware agent, beside other
+# batches) pushed a 32 GB Mac into swap until it froze.
+DEFAULT_PARALLEL_TESTS = 8
+
 @dataclass(frozen=True)
 class Test:
     id: str

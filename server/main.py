@@ -41,6 +41,7 @@ import harness  # noqa: E402
 import regrade  # noqa: E402
 import run_queue  # noqa: E402
 import seed  # noqa: E402
+from suite import DEFAULT_PARALLEL_TESTS  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-7s %(name)s: %(message)s")
 log = logging.getLogger("server")
@@ -103,10 +104,8 @@ class RunRequest(BaseModel):
 
 _runs: dict[str, dict] = {}
 
-# How many tests run at once: all of them, unless EVAL_PARALLEL caps it (for a provider whose rate limit can't take
-# tests x repetitions agent runs at the same moment). Capped tests wait as "queued". The CLI's --parallel has the
-# same default.
-MAX_PARALLEL_TESTS = int(os.environ.get("EVAL_PARALLEL") or 0) or 1_000_000
+# How many tests run at once; the rest wait as "queued". DEFAULT_PARALLEL_TESTS (suite.py) says why it isn't "all".
+MAX_PARALLEL_TESTS = int(os.environ.get("EVAL_PARALLEL") or DEFAULT_PARALLEL_TESTS)
 _slots = threading.Semaphore(MAX_PARALLEL_TESTS)
 
 

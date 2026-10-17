@@ -1,4 +1,4 @@
-"""Run all starts every test at once by default; EVAL_PARALLEL caps it, and then the rest queue."""
+"""Run all starts DEFAULT_PARALLEL_TESTS at once and queues the rest; EVAL_PARALLEL changes the cap."""
 
 import threading
 import time
@@ -29,8 +29,10 @@ def _start_ten() -> list[str]:
     return [main._runs[job["id"]]["state"] for job in started]
 
 
-def test_every_test_runs_at_once_by_default(blocking_harness):
-    assert _start_ten().count("running") == 10
+def test_the_default_cap_runs_eight_and_queues_the_rest(blocking_harness):
+    states = _start_ten()
+    assert states.count("running") == main.DEFAULT_PARALLEL_TESTS == 8
+    assert states.count("queued") == 2
 
 
 def test_a_cap_runs_that_many_and_the_rest_queue(blocking_harness, monkeypatch):
