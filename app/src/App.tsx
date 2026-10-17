@@ -7,10 +7,12 @@ import { Text } from '@langchain/macaw-components/Text';
 import { DotsThreeIcon } from '@phosphor-icons/react/dist/csr/DotsThree';
 import { DATASET_NAME } from './config';
 import { fieldClass, RemoveButton, Section, Subsection, TextAreaField, TextField } from './components/fields';
+import { CheckEditor } from './components/CheckEditor';
+import { HistoryEditor } from './components/HistoryEditor';
 import { MockToolEditor } from './components/MockToolEditor';
 import { ResultsPanel } from './components/ResultsPanel';
 import {
-  countToolCalls, deleteExample, emptyExample, errorMessage, fetchAllExamples, fetchDataset, fetchPastRuns, importTrace,
+  contextProblem, countToolCalls, deleteExample, emptyCheck, emptyExample, errorMessage, fetchAllExamples, fetchDataset, fetchPastRuns, importTrace,
   isDirty, keyId, saveExampleTo, shortDate, text, toDraft, toPayload, traceIdFrom,
   type Dataset, type Draft, type Example, type PastRun,
 } from './lib/data';
@@ -108,12 +110,12 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
     setDrafts((current) => ({ ...current, [selectedId]: { ...current[selectedId], ...patch } }));
   };
 
-  function patchRow<K extends 'mockTools' | 'assertions'>(field: K, key: string, patch: Partial<Draft[K][number]>) {
+  function patchRow<K extends 'mockTools' | 'assertions' | 'checks'>(field: K, key: string, patch: Partial<Draft[K][number]>) {
     if (!draft) return;
     patchDraft({ [field]: (draft[field] as { key: string }[]).map((row) => (row.key === key ? { ...row, ...patch } : row)) } as Partial<Draft>);
   }
 
-  function removeRow(field: 'mockTools' | 'assertions', key: string) {
+  function removeRow(field: 'mockTools' | 'assertions' | 'checks', key: string) {
     if (!draft) return;
     patchDraft({ [field]: (draft[field] as { key: string }[]).filter((row) => row.key !== key) } as Partial<Draft>);
   }
@@ -166,6 +168,8 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
           name: `${from.name}-copy`,
           mockTools: from.mockTools.map((row) => ({ ...row, key: keyId(), cases: row.cases?.map((c) => ({ ...c, key: keyId() })) ?? null })),
           assertions: from.assertions.map((row) => ({ ...row, key: keyId() })),
+          history: from.history.map((row) => ({ ...row, key: keyId() })),
+          checks: from.checks.map((row) => ({ ...row, key: keyId() })),
         }
       : toDraft(example);
     setExamples((current) => [...current, example]);
@@ -415,11 +419,17 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
               </Section>
 
               <Section title="When (input)" hint="What the agent is asked." summary={draft.prompt}>
+                <HistoryEditor history={draft.history} onChange={(history) => patchDraft({ history })} />
                 <TextAreaField value={draft.prompt} onChange={(prompt) => patchDraft({ prompt })} rows={3} placeholder="Order A1001 arrived broken, can I get my money back?" />
+                <div className="flex flex-col gap-space-1">
+                  <TextAreaField label="Context (JSON object passed to the agent hook; empty = none)" value={draft.context} onChange={(context) => patchDraft({ context })}
+                    rows={draft.context ? Math.min(12, draft.context.split('\n').length + 1) : 2} mono placeholder='{"now": "2026-10-03T09:00:00Z", "flags": {"beta": true}}' />
+                  {contextProblem(draft.context) ? <span className="text-xs text-error-primary">{contextProblem(draft.context)}</span> : null}
+                </div>
               </Section>
 
               <Section title="Assert (output)" hint="Each assertion is one sentence that must be true of the run. An LLM judge grades each one against the transcript and tool calls; its name becomes the feedback key."
-                summary={`${draft.assertions.length} assertion${draft.assertions.length === 1 ? '' : 's'}: ${draft.assertions.map((row) => row.name).join(', ')}`}>
+                summary={`${draft.assertions.length} assertion${draft.assertions.length === 1 ? '' : 's'}: ${draft.assertions.map((row) => row.name).join(', ')}${draft.checks.length ? ` · ${draft.checks.length} code check${draft.checks.length === 1 ? '' : 's'}` : ''}`}>
                 {draft.assertions.map((row) => (
                   <div key={row.key} className="flex flex-col gap-space-2 rounded-md border border-default bg-surface-level-1 p-space-3">
                     <div className="flex items-center gap-space-2">
@@ -435,6 +445,13 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
                     Add assertion
                   </Button>
                 </div>
+                <Subsection title="Code checks" hint="Deterministic checks on the tool calls, with no judge. Each name becomes a feedback key (1 or 0), like an assertion."
+                  addLabel="Add check" onAdd={() => patchDraft({ checks: [...draft.checks, emptyCheck()] })}>
+                  {draft.checks.length === 0 ? <Text variant="xs" color="tertiary">None.</Text> : null}
+                  {draft.checks.map((check) => (
+                    <CheckEditor key={check.key} check={check} tools={tools} onChange={(patch) => patchRow('checks', check.key, patch)} onRemove={() => removeRow('checks', check.key)} />
+                  ))}
+                </Subsection>
               </Section>
 
               <div className="flex flex-col items-center gap-space-2 pb-space-4">

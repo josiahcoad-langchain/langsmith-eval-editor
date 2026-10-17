@@ -14,7 +14,9 @@ from langsmith import Client
 load_dotenv()
 
 from harness import DATASET_NAME  # noqa: E402
-from hook import TOOL_NAMES  # noqa: E402
+from agent_hook import load_hook  # noqa: E402
+
+TOOL_NAMES = load_hook().TOOL_NAMES
 
 _A1001 = {"id": "A1001", "status": "delivered", "total": 42.5, "items": ["Trail mug"], "delivered_on": "2026-10-01",
           "tracking": None}

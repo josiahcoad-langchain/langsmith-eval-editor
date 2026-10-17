@@ -32,6 +32,25 @@ def test_unmocked_tool_and_unmatched_case_are_strict_failures():
     assert [call["name"] for call in mocks.unmocked] == ["refund", "ship"]
 
 
+def test_sequence_answers_each_call_in_turn_then_repeats_the_last():
+    mocks = MockTools({"generate": {"sequence": ["img-1", "img-2"]}}, today=TODAY)
+    assert [mocks.call("generate", {}, f"c{i}").content for i in range(3)] == ["img-1", "img-2", "img-2"]
+
+
+def test_sequence_counts_per_tool():
+    mocks = MockTools({"a": {"sequence": ["a1", "a2"]}, "b": {"sequence": ["b1", "b2"]}}, today=TODAY)
+    assert [mocks.call(n, {}, "c").content for n in ("a", "b", "a")] == ["a1", "b1", "a2"]
+
+
+def test_when_any_value_matches_the_value_under_any_argument_name():
+    # Parallel calls carry the record id as `post_id` on one run and `id` on the next, so match on the value.
+    cases = [{"when_any_value": "P1", "response": {"raise": "400 published"}}, {"response": "saved"}]
+    mocks = MockTools({"update_post": {"cases": cases}}, today=TODAY)
+    assert mocks.call("update_post", {"post_id": "P1"}, "c1").status == "error"
+    assert mocks.call("update_post", {"id": "P1", "caption": "x"}, "c2").status == "error"
+    assert mocks.call("update_post", {"id": "P2"}, "c3").content == "saved"
+
+
 def test_dates_shift_by_days_since_recording():
     mocks = MockTools({"ship": {"eta": "2026-10-06", "at": "2026-10-01T09:00Z", "id": "2026-13-99"}},
                       recorded_on="2026-10-03", today=TODAY)
