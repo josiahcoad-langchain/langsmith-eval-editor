@@ -14,6 +14,7 @@ Markers (skip, xfail, pass_threshold) live in each test's metadata; see suite.py
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -33,7 +34,7 @@ def main(argv: list[str] | None = None) -> int:
     chosen = select(tests, names=args.names or None, keyword=args.k, tags=args.tag or None,
                     last_failed=_last_failed(client, tests) if args.lf else None)
     print(f"collected {len(tests)} tests, selected {len(chosen)} · {args.repetitions} repetition"
-          f"{'' if args.repetitions == 1 else 's'} each · {args.parallel} at a time")
+          f"{'' if args.repetitions == 1 else 's'} each · {args.parallel or 'all'} at a time")
 
     started = time.monotonic()
     outcomes = _run(client, chosen, args.repetitions, args.parallel)
@@ -54,7 +55,8 @@ def _parse(argv: list[str] | None) -> argparse.Namespace:
     ap.add_argument("--tag", action="append", help="only tests with this tag (repeatable: any of them)")
     ap.add_argument("--lf", action="store_true", help="only tests whose newest result failed, was flaky or errored")
     ap.add_argument("-r", "--repetitions", type=int, default=3)
-    ap.add_argument("--parallel", type=int, default=4, help="tests run at once (default 4)")
+    ap.add_argument("--parallel", type=int, default=int(os.environ.get("EVAL_PARALLEL") or 0),
+                    help="tests run at once (default: all, or EVAL_PARALLEL)")
     ap.add_argument("--junit", help="write a JUnit XML report here")
     return ap.parse_args(argv)
 
@@ -89,7 +91,7 @@ def _run(client: Client, tests: list[Test], repetitions: int, parallel: int) -> 
     for o in outcomes:
         _print(o)
     to_run = [x for x in tests if not x.metadata.get("skip")]
-    with ThreadPoolExecutor(max_workers=max(1, parallel)) as pool:
+    with ThreadPoolExecutor(max_workers=parallel or max(1, len(to_run))) as pool:
         futures = {pool.submit(_run_one, client, examples[x.id], x, repetitions): x for x in to_run}
         for future in as_completed(futures):
             o = future.result()

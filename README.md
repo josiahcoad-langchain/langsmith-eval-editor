@@ -11,7 +11,7 @@ A test editor for LangChain agents, backed by a LangSmith dataset. Tests read li
   - **Assertions**: named one-sentence statements ("It never says or implies that the refund was issued."), graded by an LLM judge against the run.
   - **Code checks**: deterministic checks a judge can't grade from a transcript, such as `must_call`, `max_tool_calls` or `max_prompt_tokens`.
 
-**Run test** runs the real agent against the mocks several times in parallel and logs one LangSmith experiment. **Run all** and **Run failing** run many tests, 4 at a time. The test list works like an IDE's test explorer:
+**Run test** runs the real agent against the mocks several times in parallel and logs one LangSmith experiment. **Run all** and **Run failing** run many tests, all at once. The test list works like an IDE's test explorer:
 
 - **Each test has a status dot** for its newest result: green (passed every repetition), amber (passed some), red (failed every repetition) or a red **!** (the run errored, e.g. an incomplete test).
 - **Each assertion and code check shows its last result** inline (`3/3`, `1/3`, `0/3`).
@@ -82,7 +82,7 @@ uv run python cli.py --tag gate --junit out.xml    # CI: JUnit report, exit code
 ```
 
 ```
-collected 81 tests, selected 4 · 1 repetition each · 4 at a time
+collected 81 tests, selected 4 · 1 repetition each · all at a time
 SKIPPED   scope_billing_discount_escalates  (mocks get_billing_info, which the agent no longer has)
 XFAILED   max-context-cap  0/1 · expected: every model call sends ~158k tokens (fix pending)
 PASSED    grounded_own_plan_detail  1/1 · 13s
@@ -188,6 +188,7 @@ A hook can also define:
 - **`custom_check(outputs, check) -> (passed, reason)`**: grades checks of type `custom`, for anything the built-ins can't express.
 - **`judge_model()`**: the chat model that grades assertions. The default is `JUDGE_MODEL`, e.g. to bill grading to your agent's own key.
 - **`judges() -> {name: grader}`**: the judges Re-grade compares. Each grader has `grade_assertions`'s signature. Offer two from different vendors: a disagreement between independent judges is what points at the assertion. Without it, Re-grade uses the one judge the harness grades with.
+- **`bench_judges() -> {name: grader}`**: extra candidates for the judge bench (below), beyond `judges()`.
 - **`grade_assertions(assertions, evidence) -> [Grade]`**: replaces assertion grading entirely. For example, a cheap yes/no classifier that hands only the cases it's unsure of to a chat model. A `Grade` with `passed=None` means undecided and is scored `None`, never a pass.
 
 **Keeping the hook in your agent's repo.** Set `EVAL_HOOK` to its module path and run the server from your agent's environment, with this server on `PYTHONPATH`:
@@ -197,14 +198,14 @@ EVAL_HOOK=tests.evals.hook EVAL_DATASET=my-agent-tests PYTHONPATH=.:/path/to/eva
   uv run uvicorn main:app --app-dir /path/to/eval-editor/server --port 8765
 ```
 
-The server reports that checkout's git commit to the editor. Experiments record the commit they ran on, which is how the editor flags results produced by older agent code.
+The server reports that checkout's git commit to the editor, and every commit since the last one that touched `EVAL_AGENT_PATHS`. Experiments record the commit they ran on, which is how the editor flags results produced by older agent code.
 
 Then set the names in `server/.env` and `app/.env` (copy each `.env.example`): `EVAL_DATASET` / `VITE_DATASET_NAME` for the dataset, and `VITE_TRACE_PROJECT` for the project Import reads. The server writes the agent's tool names to the dataset's metadata (`agent_tools`) on start, which is where the editor reads them from in both modes. `AGENT_MODEL` and `JUDGE_MODEL` take any `init_chat_model` string.
 
 ## Working in the editor
 
 - **Run test / Run all / Run failing.** "Failing" means every test whose newest result is red, amber or errored. Run all and Run failing confirm first, showing the run count and an **estimated cost**: each test's LangSmith-priced cost per repetition on its newest run, times the repetitions chosen. The estimate covers the agent's model calls only (graders trace elsewhere), and tests with no priced run yet are counted separately rather than guessed.
-- **Runs go 4 tests at a time.** The server queues the rest (`MAX_PARALLEL_TESTS` in `main.py`), and the list shows each test as queued or running until its result lands.
+- **Every test runs at once.** Set `EVAL_PARALLEL=N` (server and CLI; or the CLI's `--parallel N`) when your model provider's rate limit can't take tests × repetitions agent runs together; the server then queues the rest, and the list shows each test as queued or running until its result lands.
 - **Status dots** come from the dataset's experiment list, newest first, read only until every test has a status. That's usually one request, however many experiments the dataset has run. They refresh every 30 s, and right away when a run finishes.
 - **Results** lists every run of the selected test, newest first, with each assertion's and check's score and reason per repetition.
 - **Why did it fail?** Click an assertion's or check's result chip. Each repetition of the newest run shows the judge's verdict and reason **beside the agent's reply and tool calls**. Then click **Re-grade**. It grades those same saved replies again, 3 times with each judge the hook offers, without re-running the agent (judges' cost only), and names the cause:
@@ -217,7 +218,27 @@ Then set the names in `server/.env` and `app/.env` (copy each `.env.example`): `
   | **The original grade was wrong** | Every fresh grade agrees and contradicts the original: grading at run time was broken or has changed | Nothing: re-run |
 
   Code checks are deterministic, so a mixed code-check result always means the agent varied. Re-grade needs the web server.
-- **Out of date.** A result stops counting as current when the test was edited after the run (the run records the dataset version it used) or when the server's agent commit differs from the run's. Out-of-date dots and chips fade, and the header strikes the last run through with the reason.
+- **Out of date.** A result stops counting as current when the test was edited after the run, or when the agent's code changed since. "Edited" compares a content hash of the test's inputs and assertions with the one the run recorded, so a new description or tag doesn't count. "The agent's code changed" means a commit since the run touched `EVAL_AGENT_PATHS` (space-separated git pathspecs; default the whole checkout), so a commit that only changes evals or docs leaves results current. Out-of-date dots and chips fade, and the header strikes the last run through with the reason and a **Run it again** link.
+- **Agent replies render as markdown** in the drill-down, the way a chat UI shows them.
+- **Judge right? yes / no.** Each graded repetition in the drill-down takes a label: was the judge's verdict right? It's saved as `human-label` feedback on the run (score = the right verdict, value = the assertion's name). Labels are what the judge bench measures judges against.
+
+## Pick a judge: the bench
+
+```bash
+uv run python bench.py                    # every labelled verdict, 3 grades per judge each
+uv run python bench.py --unlabelled 20    # also 20 recent unlabelled ones (consistency only)
+```
+
+Every candidate judge grades every labelled item `--times` times, from the run's saved transcript (no agent runs, judges' cost only). Candidates are the hook's `judges()` plus `bench_judges()`, extra ones worth trying, such as a cheaper model or a classifier without its fallback. For each judge it reports:
+
+| Metric | Meaning |
+|---|---|
+| accuracy | the majority grade matches the label |
+| consistent | every repeat of an item agreed (an undecided grade breaks agreement) |
+| undecided | share of grades that came back undecided |
+| s/grade | median seconds per grade |
+
+It recommends the **fastest judge within 1 point of the best accuracy that is at least 95% consistent**, and lists the labelled items each judge got wrong. It never recommends from consistency alone: a judge that always says "pass" is perfectly consistent, so with no labels there's no pick.
 
 ## Turn it into a LangSmith custom app
 

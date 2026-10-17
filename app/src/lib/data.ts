@@ -562,13 +562,19 @@ const STATUS_PAGE = 100;
 
 // Why a test's newest result no longer describes it, or null if it still does. Out of date when what the test
 // asks changed after the run (its content hash differs from the one the run recorded: metadata such as tags or a
-// description does not count), or when the agent's code moved on (web mode knows the current commit; a run
-// records its own). `currentHash` is the test's hash now (contentHash.ts); undefined while it is computed.
-export function staleness(summary: TestSummary | undefined, currentHash: string | undefined, agentCommit?: string): string | null {
+// description does not count), or when the agent's code moved on. Web mode knows the current commit and every
+// commit with the same agent code (`sameAgentCommits`: commits that only touched evals or docs don't count); a run
+// records its own. `currentHash` is the test's hash now (contentHash.ts); undefined while it is computed.
+export function staleness(summary: TestSummary | undefined, currentHash: string | undefined, agentCommit?: string,
+  sameAgentCommits?: string[]): string | null {
   if (!summary || summary.status === 'none') return null;
   // Runs from before hashes were recorded can't be compared; saying "out of date" for them would be a guess.
   if (summary.testHash && currentHash && summary.testHash !== currentHash) return 'the test was edited after this run';
-  if (agentCommit && summary.agentCommit && !summary.agentCommit.startsWith(agentCommit.slice(0, 7))) {
+  const ran = summary.agentCommit;
+  const sameAgent = sameAgentCommits?.length
+    ? sameAgentCommits.some((commit) => commit.startsWith(ran.slice(0, 7)))
+    : !agentCommit || ran.startsWith(agentCommit.slice(0, 7));
+  if (agentCommit && ran && !sameAgent) {
     return `the agent's code changed since this run (${summary.agentCommit.slice(0, 8)} → ${agentCommit.slice(0, 8)})`;
   }
   return null;

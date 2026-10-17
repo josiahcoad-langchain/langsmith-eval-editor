@@ -66,17 +66,32 @@ def config() -> dict:
     # https://smith.langchain.com/o/<workspace>/datasets/<id> -> the workspace's base URL and ID
     web, _, rest = _dataset_url.partition("/o/")
     workspace_id = rest.split("/")[0]
-    return {"host": web, "workspaceId": workspace_id, "dataset": harness.DATASET_NAME, "agentCommit": _agent_commit()}
+    return {"host": web, "workspaceId": workspace_id, "dataset": harness.DATASET_NAME, "agentCommit": _git("rev-parse", "HEAD"),
+            "sameAgentCommits": _same_agent_commits()}
 
 
-def _agent_commit() -> str:
-    """The commit the agent under test is on (the server runs from its checkout), so the UI can tell a result
-    produced by older agent code from a current one. Experiments record the commit they ran on, the same way."""
+# The agent's own code, as git pathspecs relative to the checkout the server runs from (space-separated). A commit
+# that touches none of them (an eval, a doc) leaves the agent as it was, so results run on it stay current.
+AGENT_PATHS = (os.environ.get("EVAL_AGENT_PATHS") or ".").split()
+SAME_AGENT_LIMIT = 500
+
+
+def _same_agent_commits() -> list[str]:
+    """Every commit whose agent code is the same as HEAD's: HEAD back to the last commit that changed AGENT_PATHS.
+    Experiments record the commit they ran on, so the UI calls a result out of date only when that commit isn't
+    one of these. Empty when the server isn't in a git checkout, and the UI then can't say."""
+    last_change = _git("log", "-1", "--format=%H", "--", *AGENT_PATHS)
+    if not last_change:
+        return []
+    since = _git("rev-list", f"--max-count={SAME_AGENT_LIMIT}", f"{last_change}..HEAD").split()
+    return [*since, last_change]
+
+
+def _git(*args: str) -> str:
     try:
-        head = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
+        return subprocess.run(["git", *args], capture_output=True, text=True, check=True).stdout.strip()
     except (OSError, subprocess.CalledProcessError):
         return ""
-    return head
 
 
 # --- Runs (standalone) --------------------------------------------------------------------------------
@@ -88,10 +103,10 @@ class RunRequest(BaseModel):
 
 _runs: dict[str, dict] = {}
 
-# How many tests run at once. "Run all" sends every test in one request; starting them all together would put
-# (tests x repetitions) agent runs on the model provider at the same moment. The rest wait as "queued". Same
-# limit as harness.run_tests uses from the command line.
-MAX_PARALLEL_TESTS = 4
+# How many tests run at once: all of them, unless EVAL_PARALLEL caps it (for a provider whose rate limit can't take
+# tests x repetitions agent runs at the same moment). Capped tests wait as "queued". The CLI's --parallel has the
+# same default.
+MAX_PARALLEL_TESTS = int(os.environ.get("EVAL_PARALLEL") or 0) or 1_000_000
 _slots = threading.Semaphore(MAX_PARALLEL_TESTS)
 
 

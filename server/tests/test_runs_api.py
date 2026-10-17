@@ -1,37 +1,40 @@
-"""Run all must not start every test at once: the server runs a few at a time and queues the rest."""
+"""Run all starts every test at once by default; EVAL_PARALLEL caps it, and then the rest queue."""
 
 import threading
 import time
 
+import pytest
+
 import main
 
 
-def test_runs_are_capped_and_the_rest_queue(monkeypatch):
-    # Given a harness whose runs block until released, and more tests than slots
+@pytest.fixture
+def blocking_harness(monkeypatch):
+    """A harness whose runs block until released. Drains every job afterwards while the fake is still patched in;
+    otherwise queued ones would run the real harness after the test ends and call LangSmith."""
     release = threading.Event()
-    running = []
-
-    def run_tests(example_ids, repetitions):
-        running.append(example_ids[0])
-        release.wait(5)
-
-    monkeypatch.setattr(main.harness, "run_tests", run_tests)
+    monkeypatch.setattr(main.harness, "run_tests", lambda example_ids, repetitions: release.wait(5))
     main._runs.clear()
-
-    # When ten tests are started in one request
-    started = main.start_runs(main.RunRequest(example_ids=[f"e{i}" for i in range(10)], repetitions=1))
-    time.sleep(0.3)
-
-    # Then only MAX_PARALLEL_TESTS run, and the others wait as queued
-    states = [main._runs[job["id"]]["state"] for job in started]
-    assert len(started) == 10
-    assert states.count("running") == main.MAX_PARALLEL_TESTS
-    assert states.count("queued") == 10 - main.MAX_PARALLEL_TESTS
-
-    # Drain every job while the fake harness is still patched in; otherwise the queued ones run the real
-    # harness after the test ends and call LangSmith.
+    yield
     release.set()
     deadline = time.time() + 5
-    while time.time() < deadline and any(main._runs[job["id"]]["state"] != "done" for job in started):
+    while time.time() < deadline and any(job["state"] != "done" for job in main._runs.values()):
         time.sleep(0.05)
-    assert all(main._runs[job["id"]]["state"] == "done" for job in started)
+    assert all(job["state"] == "done" for job in main._runs.values())
+
+
+def _start_ten() -> list[str]:
+    started = main.start_runs(main.RunRequest(example_ids=[f"e{i}" for i in range(10)], repetitions=1))
+    time.sleep(0.3)
+    return [main._runs[job["id"]]["state"] for job in started]
+
+
+def test_every_test_runs_at_once_by_default(blocking_harness):
+    assert _start_ten().count("running") == 10
+
+
+def test_a_cap_runs_that_many_and_the_rest_queue(blocking_harness, monkeypatch):
+    monkeypatch.setattr(main, "_slots", threading.Semaphore(4))
+    states = _start_ten()
+    assert states.count("running") == 4
+    assert states.count("queued") == 6

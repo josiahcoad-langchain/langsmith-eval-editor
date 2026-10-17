@@ -3,6 +3,7 @@ import { Button } from '@langchain/macaw-components/Button';
 import { Spinner } from '@langchain/macaw-components/Spinner';
 import { errorMessage, fetchLabels, fetchReasons, fetchResults, saveLabel, shortDate, text, type Json, type Label, type TestResult } from '../lib/data';
 import { isWeb, requestRegrade, type Regrade } from '../runs';
+import { Markdown } from './Markdown';
 
 // One assertion's (or code check's) grades on the test's newest run, each beside what the agent actually did, so
 // "was the agent wrong, or the grade?" can be answered by reading. For an assertion, Re-grade grades the SAME saved
@@ -84,7 +85,12 @@ export function AssertionDrilldown({ datasetId, exampleId, testName, name, kind,
               <span className="text-secondary"><span className="text-tertiary">Judge: </span>{reasons[run.runId] || grade?.comment}</span>
             ) : null}
             {run.error ? <span className="text-error-primary">{run.error}</span> : null}
-            {run.answer ? <span className="whitespace-pre-wrap text-primary"><span className="text-tertiary">Agent replied: </span>{run.answer}</span> : null}
+            {run.answer ? (
+              <div className="text-primary">
+                <div className="text-tertiary">Agent replied:</div>
+                <div className="border-l-2 border-secondary pl-3"><Markdown source={run.answer} /></div>
+              </div>
+            ) : null}
             {kind === 'assertion' && grade && grade.score !== null && !run.error ? (
               <JudgeLabel judgedPass={grade.score === 1} label={labels[run.runId]}
                 onLabel={async (judgeRight) => {

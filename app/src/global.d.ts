@@ -5,6 +5,8 @@ declare global {
   type RenderMetadata = {
     // Web mode only: the commit the agent under test is on, to flag results from older agent code.
     agentCommit?: string;
+    // Web mode only: every commit with the same agent code as agentCommit (EVAL_AGENT_PATHS unchanged since).
+    sameAgentCommits?: string[];
     mode: 'dark' | 'light';
     /** Empty when the workspace is unresolved. */
     workspaceId: string;

@@ -31,7 +31,7 @@ type ListStatus = TestStatus | 'queued' | 'running';
 
 const STATUS_DOT: Record<ListStatus, { glyph: string; color: string; label: string }> = {
   running: { glyph: '◐', color: 'text-secondary animate-spin', label: 'Running now' },
-  queued: { glyph: '◌', color: 'text-tertiary', label: 'Queued: waits for a free slot (4 tests run at a time)' },
+  queued: { glyph: '◌', color: 'text-tertiary', label: 'Queued: waits for a free slot (EVAL_PARALLEL caps how many tests run at once)' },
   pass: { glyph: '●', color: 'text-success-primary', label: 'Newest run: every assertion and check passed on every repetition' },
   fail: { glyph: '●', color: 'text-error-primary', label: 'Newest run: something failed on every repetition' },
   flaky: { glyph: '●', color: 'text-warning-primary', label: 'Newest run: passed on some repetitions and failed on others' },
@@ -328,7 +328,7 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
 
   const savedExamples = examples.filter((e) => !e.isNew);
   const selectedStale = selected && !selected.isNew
-    ? (dirty ? 'the test has unsaved edits' : staleness(summaries[selected.id], hashes[selected.id], metadata?.agentCommit))
+    ? (dirty ? 'the test has unsaved edits' : staleness(summaries[selected.id], hashes[selected.id], metadata?.agentCommit, metadata?.sameAgentCommits))
     : null;
   const failingExamples = savedExamples.filter((e) => ['fail', 'flaky', 'error'].includes(summaries[e.id]?.status ?? ''));
   const batchFor = (which: 'all' | 'failing') => (which === 'all' ? savedExamples : failingExamples);
@@ -395,7 +395,7 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
         <div className="flex flex-col gap-space-1 rounded-md border border-default p-space-2 text-xs text-secondary">
           <span>
             Run {batchFor(confirmBatch).length} test{batchFor(confirmBatch).length === 1 ? '' : 's'} × {repetitions} repetition{repetitions === 1 ? '' : 's'}
-            {' '}= {batchFor(confirmBatch).length * repetitions} agent runs, 4 tests at a time?
+            {' '}= {batchFor(confirmBatch).length * repetitions} agent runs, all at once?
           </span>
           {(() => {
             const { dollars, unpriced } = estimate(batchFor(confirmBatch));
@@ -470,7 +470,7 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
               subtitle={exampleDraft?.description || `${count} assertions`}
               badge={example.isNew ? 'new' : dirtyIds.has(example.id) ? '● unsaved' : `${count} asserts`}
               status={example.isNew ? undefined : activeRuns[example.id] ?? summaries[example.id]?.status}
-              stale={!activeRuns[example.id] && staleness(summaries[example.id], hashes[example.id], metadata?.agentCommit) !== null}
+              stale={!activeRuns[example.id] && staleness(summaries[example.id], hashes[example.id], metadata?.agentCommit, metadata?.sameAgentCommits) !== null}
               onClick={() => select(example.id)}
             />
           );
@@ -518,7 +518,8 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
                   </Text>
                   {!selected.isNew ? (
                     <LastRun summary={summaries[selected.id]} error={lastError} onOpen={() => setShowResults(true)}
-                      stale={dirty ? 'the test has unsaved edits' : staleness(summaries[selected.id], hashes[selected.id], metadata?.agentCommit)} />
+                      onRun={dirty || running ? undefined : () => void runTest()}
+                      stale={dirty ? 'the test has unsaved edits' : staleness(summaries[selected.id], hashes[selected.id], metadata?.agentCommit, metadata?.sameAgentCommits)} />
                   ) : null}
                 </div>
                 <div className="flex flex-wrap gap-space-2">

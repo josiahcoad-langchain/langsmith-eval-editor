@@ -3,9 +3,14 @@ import { shortDate, type TestSummary } from '../lib/data';
 // The test's newest result in one line at the top of the test, like an IDE's last-run banner: when, how it went,
 // what it cost, how long it took and which agent commit it ran on. When the result no longer describes the test
 // (`stale`), it says so instead of passing an old result off as current.
-export function LastRun({ summary, stale, error = '', onOpen }: { summary?: TestSummary; stale: string | null; error?: string; onOpen: () => void }) {
+export function LastRun({ summary, stale, error = '', onOpen, onRun }: {
+  summary?: TestSummary; stale: string | null; error?: string; onOpen: () => void; onRun?: () => void;
+}) {
   if (!summary) return null;
-  if (summary.status === 'none') return <span className="text-xs text-tertiary">Never run.</span>;
+  const run = (label: string) => onRun
+    ? <button type="button" className="font-medium text-brand-primary underline-offset-2 hover:underline" onClick={onRun}>{label}</button>
+    : null;
+  if (summary.status === 'none') return <span className="text-xs text-tertiary">Never run. {run('Run now')}</span>;
   const keys = Object.values(summary.keys);
   const allPassed = keys.filter((k) => k.passed === k.n).length;
   const verdict = summary.status === 'error'
@@ -25,7 +30,7 @@ export function LastRun({ summary, stale, error = '', onOpen }: { summary?: Test
         {': '}<span className={stale ? '' : tone}>{verdict}</span>{' · '}{parts.join(' · ')}
       </span>
       {summary.status === 'error' && error ? <span className="text-error-primary">Why: {error}</span> : null}
-      {stale ? <span className="text-warning-primary">Out of date: {stale}. Run it again to refresh.</span> : null}
+      {stale ? <span className="text-warning-primary">Out of date: {stale}. {run('Run it again') ?? 'Run it again'} to refresh.</span> : null}
     </span>
   );
 }
