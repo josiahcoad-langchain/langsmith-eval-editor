@@ -4,6 +4,7 @@ Each test (dataset example) is Given / When / Then:
   inputs.mock_tools, inputs.recorded_on   Given: every tool response the run may see (see mocks.py)
   inputs.history                          Given: prior turns [{role, content}] sent before the prompt
   inputs.context                          Given: opaque JSON the hook uses to set the agent up (its own keys)
+  inputs.attachments                      Given: files handed to the agent, stored as example attachments (files.py)
   inputs.prompt                           When: the message sent to the agent
   outputs.assertions                      Then: [{name, assertion}], one-sentence statements about the run
   outputs.checks                          Then: [{name, type, ...}], code checks a judge can't grade (checks.py)
@@ -25,6 +26,7 @@ the test, not the agent, is what needs fixing.
 
 from __future__ import annotations
 
+import inspect
 import json
 import os
 from concurrent.futures import ThreadPoolExecutor
@@ -41,6 +43,7 @@ from agent_hook import load_hook  # noqa: E402
 from checks import run_checks  # noqa: E402
 from content_hash import content_hash  # noqa: E402
 from evidence import build_evidence  # noqa: E402
+from files import AgentRun, Attachment, FileProblem, describe, materialize  # noqa: E402
 from mocks import MockTools  # noqa: E402
 from suite import Repetition  # noqa: E402
 
@@ -86,16 +89,29 @@ def _this_turn(messages: list[BaseMessage], inputs: dict) -> list[BaseMessage]:
     return messages[len(inputs.get("history") or []):]
 
 
-def _run_agent(inputs: dict, mocks: MockTools) -> list[BaseMessage]:
-    # Pass history and context only when the test has them, so hooks written before they existed still work.
-    extra = {key: inputs[key] for key in ("history", "context") if inputs.get(key)}
+def _run_agent(inputs: dict, mocks: MockTools, files: list[Attachment]) -> list[BaseMessage] | AgentRun:
+    # Pass history, context and files only when the test has them, so hooks written before they existed still work.
+    extra: dict = {key: inputs[key] for key in ("history", "context") if inputs.get(key)}
+    if files:
+        if "attachments" not in inspect.signature(hook.run_agent).parameters:
+            raise IncompleteTest("This test hands the agent files, but the hook's run_agent takes no `attachments`.")
+        extra["attachments"] = files
     return hook.run_agent(inputs["prompt"], mocks, **extra)
 
 
-def target(inputs: dict) -> dict:
-    """One run of one test: the agent answers the prompt with every tool call served from the test's mocks."""
+def target(inputs: dict, attachments: dict | None = None) -> dict:
+    """One run of one test: the agent answers the prompt with every tool call served from the test's mocks.
+
+    `attachments` is LangSmith's name for the example's stored files ({name: {reader, mime_type, ...}}); it
+    passes them because this function has a parameter by that name (see files.py).
+    """
     mocks = MockTools(inputs.get("mock_tools"), inputs.get("recorded_on"))
-    messages = _run_agent(inputs, mocks)
+    try:
+        files = materialize(inputs.get("attachments") or [], attachments)
+    except FileProblem as problem:
+        raise IncompleteTest(str(problem)) from problem
+    result = _run_agent(inputs, mocks, files)
+    messages, made = (result.messages, result.files) if isinstance(result, AgentRun) else (result, [])
     if mocks.unmocked:
         # Not a grade: the test is incomplete. After the first unmocked call the agent was answering an error
         # the test never wrote, so nothing it did afterwards says anything about the agent.
@@ -103,8 +119,11 @@ def target(inputs: dict) -> dict:
         raise IncompleteTest(f"Test incomplete: no mock answered {names}. Mock it (or add a matching case).")
     turn = _this_turn(messages, inputs)
     answer = next((m.text for m in reversed(turn) if isinstance(m, AIMessage) and m.text), "")
-    return {"answer": answer, "tool_calls": mocks.calls, "model_calls": _model_calls(turn),
-            "transcript": _transcript(turn)}
+    outputs = {"answer": answer, "tool_calls": mocks.calls, "model_calls": _model_calls(turn),
+               "transcript": _transcript(turn)}
+    if made:
+        outputs["files"] = describe(made)
+    return outputs
 
 
 def _errored(outputs: dict) -> bool:
@@ -216,6 +235,9 @@ def run_test_repetitions(example, repetitions: int = 3, client: Client | None = 
 
 def _evaluate(example, repetitions: int, client: Client | None):
     name = test_name(example)
+    if (example.inputs or {}).get("attachments"):
+        # Listing examples leaves out their files; reading one example by id downloads them.
+        example = (client or Client()).read_example(example.id)
     return evaluate(target, data=[example], evaluators=[assertions, code_checks], client=client,
                     num_repetitions=repetitions, max_concurrency=repetitions, experiment_prefix=name,
                     # test_hash: what the test asked when it ran, so the editor can tell when it has changed since.

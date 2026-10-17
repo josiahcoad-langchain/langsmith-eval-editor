@@ -1,3 +1,4 @@
+import type { TestFile } from './lib/data';
 // How Run test reaches the eval server, in each mode:
 //   web         POST /api/runs on the server that serves this page; it runs the tests right away.
 //   custom app  The app can only talk to LangSmith, so it commits the request to a Context Hub prompt repo
@@ -154,4 +155,27 @@ export async function requestRegrade(exampleId: string, name: string, times = 3)
   });
   if (!response.ok) throw await errorFrom(response);
   return (await response.json()) as Regrade;
+}
+
+// --- Files in a test's Given (server/attach.py). Web mode only: uploading needs the server. ---
+
+export async function uploadFile(exampleId: string, file: File): Promise<TestFile[]> {
+  const response = await fetch(`/api/examples/${exampleId}/files?name=${encodeURIComponent(file.name)}`, {
+    method: 'POST',
+    headers: { 'content-type': file.type || 'application/octet-stream' },
+    body: file,
+  });
+  if (!response.ok) throw await errorFrom(response);
+  return (await response.json()) as TestFile[];
+}
+
+export async function removeFile(exampleId: string, name: string): Promise<TestFile[]> {
+  const response = await fetch(`/api/examples/${exampleId}/files/${encodeURIComponent(name)}`, { method: 'DELETE' });
+  if (!response.ok) throw await errorFrom(response);
+  return (await response.json()) as TestFile[];
+}
+
+export function fileUrl(exampleId: string, file: TestFile) {
+  // The hash in the URL makes a replaced file load fresh instead of from the browser cache.
+  return `/api/examples/${exampleId}/files/${encodeURIComponent(file.name)}?v=${file.sha256.slice(0, 12)}`;
 }

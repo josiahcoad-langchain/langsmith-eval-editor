@@ -12,11 +12,12 @@ import { LastRun } from './components/LastRun';
 import { ResultChip } from './components/ResultChip';
 import { CheckEditor } from './components/CheckEditor';
 import { HistoryEditor } from './components/HistoryEditor';
+import { FilesEditor } from './components/FilesEditor';
 import { MockToolEditor } from './components/MockToolEditor';
 import { ResultsPanel } from './components/ResultsPanel';
 import {
   contextProblem, countToolCalls, deleteExample, emptyCheck, emptyExample, errorMessage, fetchAllExamples, fetchDataset, fetchPastRuns, fetchResults, fetchStatuses, importTrace, staleness,
-  isDirty, keyId, saveExampleTo, shortDate, text, toDraft, toPayload, traceIdFrom,
+  isDirty, keyId, saveExampleTo, shortDate, testFiles, text, toDraft, toPayload, traceIdFrom, withFiles,
   type Dataset, type Draft, type Example, type PastRun, type TestStatus, type TestSummary,
 } from './lib/data';
 import { fetchActiveRuns, isWeb, requestRun, requestRuns } from './runs';
@@ -557,12 +558,18 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
                   `${draft.mockTools.length} mock tool${draft.mockTools.length === 1 ? '' : 's'}`,
                   draft.history.length ? `${draft.history.length} earlier turn${draft.history.length === 1 ? '' : 's'}` : '',
                   draft.context.trim() ? 'context' : '',
+                  testFiles(selected).length ? `${testFiles(selected).length} file${testFiles(selected).length === 1 ? '' : 's'}` : '',
                 ].filter(Boolean).join(' · ')}>
                 <div className="flex flex-col gap-space-1">
                   <TextAreaField label="Context (JSON object passed to the agent hook; empty = none)" value={draft.context} onChange={(context) => patchDraft({ context })}
                     rows={draft.context ? Math.min(12, draft.context.split('\n').length + 1) : 2} mono placeholder='{"now": "2026-10-03T09:00:00Z", "flags": {"beta": true}}' />
                   {contextProblem(draft.context) ? <span className="text-xs text-error-primary">{contextProblem(draft.context)}</span> : null}
                 </div>
+                {!selected.isNew ? (
+                  <FilesEditor exampleId={selected.id} files={testFiles(selected)}
+                    // Saved on the server already; the local copy takes the new list so the next autosave keeps it.
+                    onChange={(files) => setExamples((current) => current.map((row) => (row.id === selected.id ? withFiles(row, files) : row)))} />
+                ) : null}
                 <HistoryEditor history={draft.history} onChange={(history) => patchDraft({ history })} />
                 <Subsection
                   title="Mock tools"

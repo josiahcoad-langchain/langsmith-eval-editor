@@ -37,6 +37,7 @@ from pydantic import BaseModel
 
 load_dotenv()
 
+import attach  # noqa: E402
 import harness  # noqa: E402
 import regrade  # noqa: E402
 import run_queue  # noqa: E402
@@ -151,6 +152,35 @@ def regrade_assertion(body: RegradeRequest) -> dict:
 @app.get("/api/runs")
 def list_runs() -> list[dict]:
     return sorted(_runs.values(), key=lambda job: job["requested_at"], reverse=True)
+
+
+# --- Files in a test's Given (attach.py) ----------------------------------------------------------------
+# The file is the raw request body and its type the Content-Type header, so no multipart parser is needed: the
+# server often runs from the agent's own environment, which shouldn't need an extra package for this.
+
+@app.post("/api/examples/{example_id}/files")
+async def add_file(example_id: str, name: str, request: Request) -> list[dict]:
+    mime_type = (request.headers.get("content-type") or "application/octet-stream").split(";")[0]
+    try:
+        return attach.attach_file(client, client.read_example(example_id), name, mime_type, await request.body())
+    except ValueError as error:
+        raise HTTPException(400, str(error)) from error
+
+
+@app.delete("/api/examples/{example_id}/files/{name}")
+def delete_file(example_id: str, name: str) -> list[dict]:
+    return attach.remove_file(client, client.read_example(example_id), name)
+
+
+@app.get("/api/examples/{example_id}/files/{name}")
+def get_file(example_id: str, name: str) -> Response:
+    """The file's bytes, for the editor's preview (reading the example downloads its files)."""
+    stored = client.read_example(example_id).attachments or {}
+    if name not in stored:
+        raise HTTPException(404, f"no file named {name} on this test")
+    reader = stored[name]["reader"]
+    reader.seek(0)
+    return Response(reader.read(), media_type=stored[name].get("mime_type") or "application/octet-stream")
 
 
 # --- Webhook (custom app) ------------------------------------------------------------------------------

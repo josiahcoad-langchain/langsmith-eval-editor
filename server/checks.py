@@ -14,6 +14,7 @@ Types (params after the type):
     must_call_with_values  tool, args: {arg: value}            some call to `tool` carried every value
     max_prompt_tokens      max                                 the largest single model call's input <= max
     max_model_calls        max                                 model calls in the run <= max
+    must_output_file       mime?, name_contains?               the agent made a file (of that type / name)
     custom                 anything                            graded by the hook's `custom_check`
 
 Each check becomes a feedback key named after it, scored 1 or 0 with a one-line reason. An unknown type
@@ -108,6 +109,16 @@ def _max_model_calls(outputs: dict, check: dict) -> tuple[bool, str]:
     return count <= check["max"], f"Model calls: {count} (max {check['max']})."
 
 
+def _must_output_file(outputs: dict, check: dict) -> tuple[bool, str]:
+    files = outputs.get("files") or []
+    mime, part = check.get("mime") or "", check.get("name_contains") or ""
+    matching = [f for f in files if f.get("mime_type", "").startswith(mime) and part in f.get("name", "")]
+    wanted = " ".join(filter(None, [mime and f"of type {mime}*", part and f"named *{part}*"])) or "at all"
+    if matching:
+        return True, f"Made {', '.join(f['name'] for f in matching)}."
+    return False, f"Made no file {wanted} (made: {', '.join(f['name'] for f in files) or 'none'})."
+
+
 _GRADERS: dict[str, Callable[[dict, dict], tuple[bool, str]]] = {
     "must_call": _must_call,
     "must_not_call": _must_not_call,
@@ -117,4 +128,5 @@ _GRADERS: dict[str, Callable[[dict, dict], tuple[bool, str]]] = {
     "must_call_with_values": _must_call_with_values,
     "max_prompt_tokens": _max_prompt_tokens,
     "max_model_calls": _max_model_calls,
+    "must_output_file": _must_output_file,
 }

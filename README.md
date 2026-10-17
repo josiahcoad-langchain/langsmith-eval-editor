@@ -149,6 +149,19 @@ A test is one dataset example:
 | `{"sequence": [r1, r2, ...]}` | A different response per call. The last one repeats |
 | `{"raise": "503 ..."}` | The call fails with that message. Usable as a case's response too |
 
+### Files (images, video)
+
+A test can hand the agent files, such as a photo to lighten or a video to caption. Add them in the Given's **Files** section (web editor) or from the command line:
+
+```bash
+uv run python attach.py lighten-photo photo.jpg          # add or replace
+uv run python attach.py lighten-photo --remove photo.jpg
+```
+
+The bytes are stored as LangSmith example attachments, and `inputs.attachments` lists each one as `{name, mime_type, sha256}`. Because that list is part of the test's inputs, replacing a file counts as editing the test, so earlier results go out of date. Each run gets its own copy of the files in a fresh folder, so repetitions can't edit each other's. If the stored bytes don't match the listed hash, the run errors as an incomplete test.
+
+The hook receives them as `run_agent(..., attachments=[Attachment(name, mime_type, path)])` and decides how they reach the agent (an image block in the user message, a file in a sandbox). A hook whose agent makes files returns `AgentRun(messages, files=[Attachment, ...])` instead of a message list; they appear in `outputs.files` as `{name, mime_type, path, bytes, sha256}`. Grade them with `must_output_file`, or open them in the hook's `custom_check` (for example, compare the mean brightness of the input and output images). A test with files fails as incomplete if the hook's `run_agent` doesn't accept `attachments`.
+
 ### Code checks
 
 | Type | Params | Passes when |
@@ -161,6 +174,7 @@ A test is one dataset example:
 | `must_call_with_values` | `tool`, `args: {arg: value}` | some call to `tool` carried every value |
 | `max_prompt_tokens` | `max` | the largest single model call's input ≤ `max` tokens |
 | `max_model_calls` | `max` | model calls in the run ≤ `max` |
+| `must_output_file` | `mime?`, `name_contains?` | the agent made a file (of that type prefix / with that in its name) |
 | `custom` | anything | the hook's `custom_check` says so |
 
 An unknown type scores `None` rather than passing: a typo must never read as a pass. Names are lowercase-with-dashes. Assertions and checks share one namespace, because each name is a feedback key.

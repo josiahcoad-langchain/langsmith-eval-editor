@@ -8,7 +8,7 @@ from mocks import MockTools
 
 def test_a_call_with_no_mock_makes_the_run_an_error(monkeypatch):
     # Given an agent that calls a tool the test does not mock
-    def run_agent(inputs: dict, mocks: MockTools):
+    def run_agent(inputs: dict, mocks: MockTools, files: list):
         mocks.call("get_shipping_status", {"tracking": "1Z9"}, "c1")
         return []
 

@@ -593,7 +593,9 @@ async function gradeFromRuns(datasetId: string, experiments: Record<string, Json
     const items = isRecord(page) && Array.isArray(page.items) ? page.items.filter(isRecord) : [];
     const runs = items.flatMap((item) => (Array.isArray(item.runs) ? item.runs.filter(isRecord) : []));
     for (const [, experiment] of batch) {
-      Object.assign(experiment, statsFromRuns(runs.filter((run) => text(run.project_id) === text(experiment.id))));
+      const mine = runs.filter((run) => text(run.project_id) === text(experiment.id));
+      // The lagging list entry can lack run_count too, which read as "0 repetitions" beside real grades.
+      Object.assign(experiment, statsFromRuns(mine), mine.length ? { run_count: mine.length } : {});
     }
   }
 }
@@ -745,4 +747,19 @@ export function duration(start: string, end: string) {
   if (!Number.isFinite(ms) || ms <= 0) return '';
   const minutes = Math.floor(ms / 60000);
   return minutes ? `${minutes}m ${Math.round((ms % 60000) / 1000)}s` : `${Math.round(ms / 1000)}s`;
+}
+
+// --- Files in a test's Given ------------------------------------------------------------------------------
+
+export type TestFile = { name: string; mime_type: string; sha256: string };
+
+// The files a test lists in inputs.attachments (server/files.py).
+export function testFiles(example: Example): TestFile[] {
+  const rows = Array.isArray(example.inputs.attachments) ? example.inputs.attachments.filter(isRecord) : [];
+  return rows.map((row) => ({ name: text(row.name), mime_type: text(row.mime_type), sha256: text(row.sha256) })).filter((row) => row.name);
+}
+
+export function withFiles(example: Example, files: TestFile[]): Example {
+  const { attachments: _old, ...inputs } = example.inputs;
+  return { ...example, inputs: files.length ? { ...inputs, attachments: files } : inputs };
 }
