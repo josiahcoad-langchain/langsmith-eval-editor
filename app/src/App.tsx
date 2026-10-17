@@ -365,7 +365,7 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
       <header className="flex flex-col">
         <Text variant="h1">Agent tests</Text>
         <Text variant="sm" color="secondary">
-          Given (mocked tools) · When (prompt) · Assert (one-sentence assertions). Tests autosave to the {DATASET_NAME} dataset.
+          Given (context, history, mocked tools) · When (prompt) · Assert (assertions and code checks). Tests autosave to the {DATASET_NAME} dataset.
         </Text>
       </header>
 
@@ -434,8 +434,20 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
                 </div>
               </Section>
 
-              <Section title="Given (environment)" hint="The world the agent runs in."
-                summary={`${draft.mockTools.length} mock tool${draft.mockTools.length === 1 ? '' : 's'}`}>
+              {/* Given is everything true before the prompt arrives: the agent's setup (context), the conversation so
+                  far (history) and what its tools answer (mocks). When is only the new message. */}
+              <Section title="Given (environment)" hint="The world the agent runs in, before the prompt arrives."
+                summary={[
+                  `${draft.mockTools.length} mock tool${draft.mockTools.length === 1 ? '' : 's'}`,
+                  draft.history.length ? `${draft.history.length} earlier turn${draft.history.length === 1 ? '' : 's'}` : '',
+                  draft.context.trim() ? 'context' : '',
+                ].filter(Boolean).join(' · ')}>
+                <div className="flex flex-col gap-space-1">
+                  <TextAreaField label="Context (JSON object passed to the agent hook; empty = none)" value={draft.context} onChange={(context) => patchDraft({ context })}
+                    rows={draft.context ? Math.min(12, draft.context.split('\n').length + 1) : 2} mono placeholder='{"now": "2026-10-03T09:00:00Z", "flags": {"beta": true}}' />
+                  {contextProblem(draft.context) ? <span className="text-xs text-error-primary">{contextProblem(draft.context)}</span> : null}
+                </div>
+                <HistoryEditor history={draft.history} onChange={(history) => patchDraft({ history })} />
                 <Subsection
                   title="Mock tools"
                   hint={`Every tool the agent may call in this test, with what it returns. A call to a tool that isn't listed makes the run an error: the test is incomplete, so it isn't graded.${
@@ -452,14 +464,8 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
                 </Subsection>
               </Section>
 
-              <Section title="When (input)" hint="What the agent is asked." summary={draft.prompt}>
-                <HistoryEditor history={draft.history} onChange={(history) => patchDraft({ history })} />
+              <Section title="When (input)" hint="The new message the agent is sent." summary={draft.prompt}>
                 <TextAreaField value={draft.prompt} onChange={(prompt) => patchDraft({ prompt })} rows={3} placeholder="Order A1001 arrived broken, can I get my money back?" />
-                <div className="flex flex-col gap-space-1">
-                  <TextAreaField label="Context (JSON object passed to the agent hook; empty = none)" value={draft.context} onChange={(context) => patchDraft({ context })}
-                    rows={draft.context ? Math.min(12, draft.context.split('\n').length + 1) : 2} mono placeholder='{"now": "2026-10-03T09:00:00Z", "flags": {"beta": true}}' />
-                  {contextProblem(draft.context) ? <span className="text-xs text-error-primary">{contextProblem(draft.context)}</span> : null}
-                </div>
               </Section>
 
               <Section title="Assert (output)" hint="Each assertion is one sentence that must be true of the run. An LLM judge grades each one against the transcript and tool calls; its name becomes the feedback key."
