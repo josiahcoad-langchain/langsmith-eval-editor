@@ -20,7 +20,8 @@ def test_a_call_with_no_mock_makes_the_run_an_error(monkeypatch):
 
 
 def test_an_errored_run_gets_no_grades():
-    # A run with no outputs (its target raised) must not be graded as a fail of the agent
+    # LangSmith passes an errored run's evaluators {"output": None}; that must not be graded as the agent failing
     reference = {"assertions": [{"name": "a", "assertion": "x"}], "checks": [{"name": "c", "type": "must_call", "tools": ["t"]}]}
-    assert harness.assertions({}, {}, reference) == {"results": []}
-    assert harness.code_checks({}, reference) == {"results": []}
+    errored = {"output": None}
+    assert harness.assertions({}, errored, reference) == {"results": []}
+    assert harness.code_checks(errored, reference) == {"results": []}

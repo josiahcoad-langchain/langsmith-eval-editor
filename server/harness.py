@@ -106,10 +106,19 @@ def target(inputs: dict) -> dict:
             "transcript": _transcript(turn)}
 
 
+def _errored(outputs: dict) -> bool:
+    """Whether the run raised (e.g. IncompleteTest), leaving nothing of the agent's to grade.
+
+    LangSmith hands an errored run's evaluators `{"output": None}`, not an empty dict, so this looks for what
+    `target` always returns instead of for emptiness.
+    """
+    return "transcript" not in (outputs or {})
+
+
 def code_checks(outputs: dict, reference_outputs: dict) -> dict:
     """Grades `outputs.checks` in code; each check becomes its own feedback key (see checks.py)."""
     checks = reference_outputs.get("checks") or []
-    if not outputs:  # the run errored
+    if _errored(outputs):
         return {"results": []}
     return {"results": run_checks(outputs, checks, custom=getattr(hook, "custom_check", None))}
 
@@ -172,7 +181,7 @@ def _given(inputs: dict) -> dict:
 def assertions(inputs: dict, outputs: dict, reference_outputs: dict) -> dict:
     """Grades every assertion in one call; each becomes its own feedback key."""
     tests = [t for t in reference_outputs.get("assertions") or [] if t.get("name")]
-    if not tests or not outputs:  # no outputs: the run errored, so there is nothing of the agent's to grade
+    if not tests or _errored(outputs):
         return {"results": []}
     evidence = {"given": _given(inputs), **{k: outputs.get(k) for k in ("answer", "tool_calls", "transcript")}}
     # A hook may grade assertions its own way, e.g. with a cheap yes/no classifier that hands only the cases it
