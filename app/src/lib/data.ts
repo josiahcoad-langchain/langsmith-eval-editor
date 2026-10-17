@@ -423,24 +423,43 @@ function statusOf(experiment: Json): TestStatus {
   return 'pass';
 }
 
-// The status of every test's newest experiment, by example id. Each test's runs are their own experiment, and
-// an experiment's list entry carries its per-key min/max (include_stats), so this is a few paged list calls,
-// not one call per test.
-export async function fetchStatuses(datasetId: string): Promise<Record<string, TestStatus>> {
+// The status of every test's newest experiment, by example id.
+//
+// Each test's runs are their own experiment, and an experiment's list entry carries its per-key min/max
+// (include_stats), so no per-test calls are needed. Pages come newest first and the scan stops as soon as every
+// test in `exampleIds` has a status, so it costs one page (~0.6s) however many experiments the dataset has run.
+// A test that has never run is the only thing that makes it read every page. `onPage` gets the statuses so far,
+// so dots appear while later pages load.
+export async function fetchStatuses(
+  datasetId: string,
+  exampleIds: string[],
+  onPage: (statuses: Record<string, TestStatus>) => void,
+): Promise<Record<string, TestStatus>> {
+  const wanted = new Set(exampleIds);
   const newest: Record<string, Json> = {};
-  for (let offset = 0; ; offset += 100) {
+  const statuses = () => Object.fromEntries(Object.entries(newest).map(([id, experiment]) => [id, statusOf(experiment)]));
+  for (let offset = 0; ; offset += STATUS_PAGE) {
     const page = await callLangSmith<unknown>('GET /api/v1/sessions', {
-      params: { reference_dataset: datasetId, include_stats: 'true', limit: '100', offset: String(offset) },
+      params: {
+        reference_dataset: datasetId, include_stats: 'true', sort_by: 'start_time', sort_by_desc: 'true',
+        limit: String(STATUS_PAGE), offset: String(offset),
+      },
     });
     const experiments = (Array.isArray(page) ? page : []).filter(isRecord);
     for (const experiment of experiments) {
       const exampleId = experimentExampleId(experiment);
-      if (exampleId && text(experiment.start_time) > text(newest[exampleId]?.start_time)) newest[exampleId] = experiment;
+      // Newest first, so the first experiment seen for a test is its newest.
+      if (exampleId && !(exampleId in newest)) newest[exampleId] = experiment;
     }
-    if (experiments.length < 100) break;
+    onPage(statuses());
+    const allFound = [...wanted].every((id) => id in newest);
+    if (allFound || experiments.length < STATUS_PAGE) break;
   }
-  return Object.fromEntries(Object.entries(newest).map(([exampleId, experiment]) => [exampleId, statusOf(experiment)]));
+  // Every test not found on any page has never run.
+  return { ...Object.fromEntries([...wanted].map((id) => [id, 'none' as TestStatus])), ...statuses() };
 }
+
+const STATUS_PAGE = 100;
 
 // --- Import a past run as a test -----------------------------------------------------------------------------
 

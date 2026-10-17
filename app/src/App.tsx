@@ -73,15 +73,18 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
   const [confirmDelete, setConfirmDelete] = useState(false);
   const savingIds = useRef(new Set<string>());
 
-  // Test-list dots. Refreshed on a timer so a run started from the Results panel (or the CLI) shows up.
+  // Test-list dots. Refreshed on a timer so a run started from the Results panel (or the CLI) shows up. Until the
+  // first answer arrives a test has no dot at all: showing "never run" while loading would be a false statement.
+  const exampleIds = useMemo(() => examples.filter((e) => !e.isNew).map((e) => e.id).sort().join(','), [examples]);
   useEffect(() => {
-    if (!dataset) return;
+    if (!dataset || !exampleIds) return;
     let cancelled = false;
-    const refresh = () => fetchStatuses(dataset.id).then((next) => { if (!cancelled) setStatuses(next); }).catch(() => {});
+    const show = (next: Record<string, TestStatus>) => { if (!cancelled) setStatuses(next); };
+    const refresh = () => fetchStatuses(dataset.id, exampleIds.split(','), show).then(show).catch(() => {});
     void refresh();
     const timer = window.setInterval(() => void refresh(), 30000);
     return () => { cancelled = true; window.clearInterval(timer); };
-  }, [dataset]);
+  }, [dataset, exampleIds]);
   const [importing, setImporting] = useState<'closed' | 'open' | 'busy'>('closed');
   const [importRef, setImportRef] = useState('');
   const [importStatus, setImportStatus] = useState<Notice>(null);
@@ -348,7 +351,7 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
               title={exampleDraft?.name || 'Untitled test'}
               subtitle={exampleDraft?.description || `${count} assertions`}
               badge={example.isNew ? 'new' : dirtyIds.has(example.id) ? '● unsaved' : `${count} asserts`}
-              status={example.isNew ? undefined : statuses[example.id] ?? 'none'}
+              status={example.isNew ? undefined : statuses[example.id]}
               onClick={() => select(example.id)}
             />
           );
