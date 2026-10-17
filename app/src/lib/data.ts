@@ -351,6 +351,8 @@ export type AssertionResult = { key: string; score: number | null; comment: stri
 export type TestResult = {
   runId: string; traceId: string; experimentId: string; experimentName: string;
   start: string; end: string; status: string; error: string; traceback: string; answer: string; assertions: AssertionResult[];
+  // What the agent called this run, with arguments and results, for reading a grade against what it actually did.
+  toolCalls: Json[];
 };
 
 function feedbackComment(stats: Json) {
@@ -417,12 +419,25 @@ export async function fetchResults(datasetId: string, exampleId: string, testNam
       error: readableError(text(run.error) || text(run.error_preview)),
       traceback: tracebackOf(text(run.error)),
       answer: text(outputs.answer).trim(),
+      toolCalls: Array.isArray(outputs.tool_calls) ? outputs.tool_calls.filter(isRecord) : [],
       assertions: Object.entries(stats).filter(([, v]) => isRecord(v)).map(([key, v]) => {
         const stat = v as Json;
         return { key, score: typeof stat.avg === 'number' ? stat.avg : null, comment: feedbackComment(stat) };
       }),
     };
   }).sort((a, b) => b.start.localeCompare(a.start));
+}
+
+// The judge's reason for one key on each run. The experiment-runs endpoint's FEEDBACK_STATS carries scores but
+// `comments: null`, so a reason has to come from the feedback itself. One request per run: fine for one test's
+// newest experiment (its few repetitions), too many for every run ever, so the drill-down asks, not the list.
+export async function fetchReasons(runIds: string[], key: string): Promise<Record<string, string>> {
+  const pairs = await Promise.all(runIds.map(async (runId) => {
+    const page = await callLangSmith<unknown>('GET /api/v1/feedback', { params: { run: runId, key, limit: '5' } });
+    const first = (Array.isArray(page) ? page : []).filter(isRecord)[0];
+    return [runId, first ? text(first.comment) : ''] as const;
+  }));
+  return Object.fromEntries(pairs);
 }
 
 // --- Test status (the dot in the test list) ---------------------------------------------------------------------

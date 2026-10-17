@@ -32,6 +32,9 @@ function ToolGroups({ groups, tools, anyOf, onChange }: { groups: string[][]; to
     <div className="flex flex-col gap-space-1">
       {groups.map((group, index) => (
         <div key={index} className="flex flex-wrap items-center gap-space-1">
+          {/* Rows read as one sentence: must_call needs every row ("task and update_business"), must_not_call
+              forbids each one ("task or update_business"). A fixed-width slot keeps the first row aligned. */}
+          <span className="w-8 shrink-0 text-right text-xs text-tertiary">{index > 0 ? (anyOf ? 'and' : 'or') : ''}</span>
           {group.map((tool, at) => (
             <span key={at} className="inline-flex items-center gap-space-1">
               {at > 0 ? <span className="text-xs text-tertiary">or</span> : null}

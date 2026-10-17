@@ -30,6 +30,9 @@ server/
   demo_agent.py   a small customer-support agent (orders, shipping, refunds) to demo on
   mocks.py        test mocks, applied as LangChain middleware; strict replay
   checks.py       code checks (deterministic assertions)
+  evidence.py     what a grader sees of a run, fitted under a size limit without cutting it off
+  regrade.py      Re-grade: one assertion over saved transcripts, several times, with every judge
+  diagnose.py     reads those grades: agent varied, judge unreliable, assertion ambiguous, or grade overturned
   harness.py      runs tests via langsmith.evaluate: repetitions, judge, code checks
   suite.py        the pytest-like layer: selection, markers, verdicts, summary, JUnit
   cli.py          runs tests from the command line, like pytest
@@ -105,7 +108,7 @@ Exit codes follow pytest: 0 all passed, 1 something failed (including an xfail t
 3. **Replay is strict.** A call to a tool the test doesn't mock, or with arguments no case matches, makes the run an **error** ("Test incomplete: no mock answered …"), with no grades. The test is what needs fixing. Anything the agent did after answering an error the test never wrote says nothing about the agent.
 4. **Only this turn is graded.** The hook returns the replayed history first, then this turn's messages. The harness finds the turn by the prompt's own message rather than by counting history, because an agent that summarizes a long thread returns fewer messages than it was given.
 5. **Dates shift.** Dates in mock responses (strings starting `YYYY-MM-DD`) move forward by the days since `inputs.recorded_on`, so recorded data looks exactly as fresh on every run. Leave `recorded_on` out if your context freezes the agent's clock instead.
-6. **Grading.** Assertions are graded in one judge call. The judge sees what the agent started from (`given`: the context and the last few history turns), its final answer, its messages and its tool calls. Code checks are graded in code. Each assertion or check name becomes a feedback key with score 1 or 0 and a one-sentence reason.
+6. **Grading.** Assertions are graded in one judge call. The judge sees what the agent started from (`given`: the context and the last few history turns), its final answer, its messages and its tool calls. That evidence is fitted under a size limit by shrinking its bulkiest values, never by cutting the text off, so the end of a big run (often the result that matters) always reaches the judge (`evidence.py`). Code checks are graded in code. Each assertion or check name becomes a feedback key with score 1 or 0 and a one-sentence reason.
 7. **Repetitions.** `evaluate(..., num_repetitions=n, max_concurrency=n)` runs the repetitions in parallel as one experiment, named after the test and tagged with the test's `example_id`. Mocks live inside each run, so tests also run side by side.
 
 A test is one dataset example:
@@ -184,6 +187,7 @@ A hook can also define:
 
 - **`custom_check(outputs, check) -> (passed, reason)`**: grades checks of type `custom`, for anything the built-ins can't express.
 - **`judge_model()`**: the chat model that grades assertions. The default is `JUDGE_MODEL`, e.g. to bill grading to your agent's own key.
+- **`judges() -> {name: grader}`**: the judges Re-grade compares. Each grader has `grade_assertions`'s signature. Offer two from different vendors: a disagreement between independent judges is what points at the assertion. Without it, Re-grade uses the one judge the harness grades with.
 - **`grade_assertions(assertions, evidence) -> [Grade]`**: replaces assertion grading entirely. For example, a cheap yes/no classifier that hands only the cases it's unsure of to a chat model. A `Grade` with `passed=None` means undecided and is scored `None`, never a pass.
 
 **Keeping the hook in your agent's repo.** Set `EVAL_HOOK` to its module path and run the server from your agent's environment, with this server on `PYTHONPATH`:
@@ -203,6 +207,16 @@ Then set the names in `server/.env` and `app/.env` (copy each `.env.example`): `
 - **Runs go 4 tests at a time.** The server queues the rest (`MAX_PARALLEL_TESTS` in `main.py`), and the list shows each test as queued or running until its result lands.
 - **Status dots** come from the dataset's experiment list, newest first, read only until every test has a status. That's usually one request, however many experiments the dataset has run. They refresh every 30 s, and right away when a run finishes.
 - **Results** lists every run of the selected test, newest first, with each assertion's and check's score and reason per repetition.
+- **Why did it fail?** Click an assertion's or check's result chip. Each repetition of the newest run shows the judge's verdict and reason **beside the agent's reply and tool calls**. Then click **Re-grade**. It grades those same saved replies again, 3 times with each judge the hook offers, without re-running the agent (judges' cost only), and names the cause:
+
+  | Diagnosis | What it means | What to fix |
+  |---|---|---|
+  | **The agent varied** | The judges agree with each other and with themselves, and the replies really differed | The agent |
+  | **The judge is unreliable** | The same reply got different grades from one judge | The judge, or the assertion's wording, or make it a code check |
+  | **The assertion is ambiguous** | Each judge is consistent, but they read the reply differently | The assertion's wording |
+  | **The original grade was wrong** | Every fresh grade agrees and contradicts the original: grading at run time was broken or has changed | Nothing: re-run |
+
+  Code checks are deterministic, so a mixed code-check result always means the agent varied. Re-grade needs the web server.
 - **Out of date.** A result stops counting as current when the test was edited after the run (the run records the dataset version it used) or when the server's agent commit differs from the run's. Out-of-date dots and chips fade, and the header strikes the last run through with the reason.
 
 ## Turn it into a LangSmith custom app

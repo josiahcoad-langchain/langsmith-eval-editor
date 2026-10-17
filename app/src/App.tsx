@@ -6,6 +6,7 @@ import { Text } from '@langchain/macaw-components/Text';
 import { DATASET_NAME } from './config';
 import { fieldClass, RemoveButton, Section, Subsection, TextAreaField, TextField } from './components/fields';
 import { ActionsMenu } from './components/ActionsMenu';
+import { AssertionDrilldown } from './components/AssertionDrilldown';
 import { LastRun } from './components/LastRun';
 import { ResultChip } from './components/ResultChip';
 import { CheckEditor } from './components/CheckEditor';
@@ -78,6 +79,8 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
   const [batchNotice, setBatchNotice] = useState<Notice>(null);
   // Why the selected test's newest run errored, for the header. Read only for an errored test: one small request.
   const [lastError, setLastError] = useState('');
+  // The assertion or check whose grades are open beside what the agent did (AssertionDrilldown).
+  const [drill, setDrill] = useState<{ kind: 'assertion' | 'check'; name: string } | null>(null);
   const [drafts, setDrafts] = useState<Record<string, Draft>>({});
   const [selectedId, setSelectedId] = useState<string | undefined>();
   const [loading, setLoading] = useState(true);
@@ -99,6 +102,8 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
     const timer = window.setInterval(() => void refresh(), 30000);
     return () => { cancelled = true; window.clearInterval(timer); };
   }, [dataset, exampleIds, statusTick]);
+
+  useEffect(() => setDrill(null), [selectedId]);
 
   const selectedStatus = selectedId ? summaries[selectedId]?.status : undefined;
   const selectedName = selectedId ? text(examples.find((e) => e.id === selectedId)?.metadata.name) : '';
@@ -574,10 +579,14 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
                     <div className="flex items-center gap-space-2">
                       <div className="w-64"><TextField value={row.name} onChange={(name) => patchRow('assertions', row.key, { name: name.toLowerCase().replace(/[\s_]+/g, '-') })} placeholder="assertion-name" mono /></div>
                       <div className="flex-1" />
-                      <ResultChip result={summaries[selected.id]?.keys[row.name]} ranAt={summaries[selected.id]?.ranAt ?? ''} stale={selectedStale} onOpen={() => setShowResults(true)} />
+                      <ResultChip result={summaries[selected.id]?.keys[row.name]} ranAt={summaries[selected.id]?.ranAt ?? ''} stale={selectedStale}
+                        onOpen={() => setDrill(drill?.name === row.name ? null : { kind: 'assertion', name: row.name })} />
                       <RemoveButton label={`Remove assertion ${row.name}`} onClick={() => removeRow('assertions', row.key)} />
                     </div>
                     <TextAreaField value={row.assertion} onChange={(assertion) => patchRow('assertions', row.key, { assertion })} rows={2} placeholder="It tells the customer the refund could not be processed right now." />
+                    {drill?.kind === 'assertion' && drill.name === row.name && dataset ? (
+                      <AssertionDrilldown datasetId={dataset.id} exampleId={selected.id} testName={draft.name} name={row.name} kind="assertion" onClose={() => setDrill(null)} />
+                    ) : null}
                   </div>
                 ))}
                 <div>
@@ -590,8 +599,13 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
                   {draft.checks.length === 0 ? <Text variant="xs" color="tertiary">None.</Text> : null}
                   {draft.checks.map((check) => (
                     <CheckEditor key={check.key} check={check} tools={tools} onChange={(patch) => patchRow('checks', check.key, patch)} onRemove={() => removeRow('checks', check.key)}
-                      result={<ResultChip result={summaries[selected.id]?.keys[check.name]} ranAt={summaries[selected.id]?.ranAt ?? ''} stale={selectedStale} onOpen={() => setShowResults(true)} />} />
+                      result={<ResultChip result={summaries[selected.id]?.keys[check.name]} ranAt={summaries[selected.id]?.ranAt ?? ''} stale={selectedStale}
+                        onOpen={() => setDrill(drill?.name === check.name ? null : { kind: 'check', name: check.name })} />} />
                   ))}
+                  {drill?.kind === 'check' && dataset && draft.checks.some((c) => c.name === drill.name) ? (
+                    <AssertionDrilldown datasetId={dataset.id} exampleId={selected.id} testName={draft.name} name={drill.name} kind="check" onClose={() => setDrill(null)} />
+                  ) : null}
+
                 </Subsection>
               </Section>
 

@@ -134,3 +134,24 @@ async function fetchRequests(): Promise<Json[]> {
     return parseRequest(text(kwargs.template));
   });
 }
+
+
+// --- Re-grade (web mode): grade one assertion again over the test's saved transcripts ---------------------------
+
+export type Regrade = {
+  experiment: string; judges: string[]; times: number;
+  repetitions: { number: number; original: boolean | null; regrades: Record<string, (boolean | null)[]>; reasons: Record<string, string>; answer: string; tool_calls: string[] }[];
+  cause: 'judge_unreliable' | 'grade_overturned' | 'assertion_ambiguous' | 'agent_varied' | 'consistent_fail' | 'consistent_pass';
+  advice: string;
+  failing_repetitions: number[]; disputed_repetitions: number[]; unreliable_judges: string[]; overturned_repetitions: number[];
+};
+
+export async function requestRegrade(exampleId: string, name: string, times = 3): Promise<Regrade> {
+  const response = await fetch('/api/regrade', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ example_id: exampleId, name, times }),
+  });
+  if (!response.ok) throw await errorFrom(response);
+  return (await response.json()) as Regrade;
+}

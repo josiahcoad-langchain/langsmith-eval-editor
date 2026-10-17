@@ -38,6 +38,7 @@ from pydantic import BaseModel
 load_dotenv()
 
 import harness  # noqa: E402
+import regrade  # noqa: E402
 import run_queue  # noqa: E402
 import seed  # noqa: E402
 
@@ -116,6 +117,21 @@ def start_runs(body: RunRequest) -> list[dict]:
         threading.Thread(target=_run, args=(run_id,), daemon=True).start()
         started.append(_runs[run_id])
     return started
+
+
+class RegradeRequest(BaseModel):
+    example_id: str
+    name: str
+    times: int = 3
+
+
+@app.post("/api/regrade")
+def regrade_assertion(body: RegradeRequest) -> dict:
+    """Re-grade one assertion over the test's newest saved transcripts and say why it varied (regrade.py)."""
+    try:
+        return regrade.regrade(client, body.example_id, body.name, times=max(1, min(body.times, 5)))
+    except ValueError as error:
+        raise HTTPException(400, str(error)) from error
 
 
 @app.get("/api/runs")

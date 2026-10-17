@@ -39,6 +39,7 @@ load_dotenv()
 
 from agent_hook import load_hook  # noqa: E402
 from checks import run_checks  # noqa: E402
+from evidence import build_evidence  # noqa: E402
 from mocks import MockTools  # noqa: E402
 from suite import Repetition  # noqa: E402
 
@@ -47,7 +48,6 @@ hook = load_hook()  # after load_dotenv: the agent reads its model settings at i
 DATASET_NAME = os.environ.get("EVAL_DATASET", "eval-editor-demo")
 JUDGE_MODEL = os.environ.get("JUDGE_MODEL", "anthropic:claude-sonnet-5-5")
 EVIDENCE_LIMIT = 60_000
-GIVEN_HISTORY_TURNS = 6
 
 
 def _transcript(messages: list[BaseMessage]) -> list[dict]:
@@ -162,20 +162,9 @@ def _judge():
 
 def _judge_all(tests: list[dict], evidence: dict) -> list[Grade]:
     """The default grader: one judge call grades every assertion."""
-    prompt = JUDGE_PROMPT.format(assertions=json.dumps(tests, indent=2),
-                                 evidence=json.dumps(evidence, indent=2, default=str)[:EVIDENCE_LIMIT])
+    # Not sliced: build_evidence already fitted it, value by value (see evidence.py).
+    prompt = JUDGE_PROMPT.format(assertions=json.dumps(tests, indent=2), evidence=json.dumps(evidence, default=str))
     return _judge().with_structured_output(Grades, method="json_schema").invoke(prompt).grades
-
-
-def _given(inputs: dict) -> dict:
-    """What the agent started from, so assertions like "left the other fields unchanged" are checkable.
-
-    The context, plus the tail of the history: a long thread would crowd the run itself out of the evidence.
-    """
-    given = {"context": inputs.get("context") or {}}
-    if inputs.get("history"):
-        given["history_tail"] = inputs["history"][-GIVEN_HISTORY_TURNS:]
-    return given
 
 
 def assertions(inputs: dict, outputs: dict, reference_outputs: dict) -> dict:
@@ -183,7 +172,7 @@ def assertions(inputs: dict, outputs: dict, reference_outputs: dict) -> dict:
     tests = [t for t in reference_outputs.get("assertions") or [] if t.get("name")]
     if not tests or _errored(outputs):
         return {"results": []}
-    evidence = {"given": _given(inputs), **{k: outputs.get(k) for k in ("answer", "tool_calls", "transcript")}}
+    evidence = build_evidence(inputs, outputs, EVIDENCE_LIMIT)
     # A hook may grade assertions its own way, e.g. with a cheap yes/no classifier that hands only the cases it
     # is unsure of to a chat model. It returns one {name, passed, reason} per assertion.
     grade_assertions = getattr(hook, "grade_assertions", None)
