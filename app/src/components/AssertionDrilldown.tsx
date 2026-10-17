@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Button } from '@langchain/macaw-components/Button';
 import { Spinner } from '@langchain/macaw-components/Spinner';
-import { errorMessage, fetchReasons, fetchResults, shortDate, text, type Json, type TestResult } from '../lib/data';
+import { errorMessage, fetchLabels, fetchReasons, fetchResults, saveLabel, shortDate, text, type Json, type Label, type TestResult } from '../lib/data';
 import { isWeb, requestRegrade, type Regrade } from '../runs';
 
 // One assertion's (or code check's) grades on the test's newest run, each beside what the agent actually did, so
@@ -22,6 +22,7 @@ export function AssertionDrilldown({ datasetId, exampleId, testName, name, kind,
 }) {
   const [runs, setRuns] = useState<TestResult[] | null>(null);
   const [reasons, setReasons] = useState<Record<string, string>>({});
+  const [labels, setLabels] = useState<Record<string, Label>>({});
   const [loadError, setLoadError] = useState('');
   const [regrade, setRegrade] = useState<Regrade | null>(null);
   const [regrading, setRegrading] = useState(false);
@@ -36,7 +37,10 @@ export function AssertionDrilldown({ datasetId, exampleId, testName, name, kind,
         const newest = results[0]?.experimentId;
         const reps = results.filter((r) => r.experimentId === newest).sort((a, b) => a.start.localeCompare(b.start));
         setRuns(reps);
-        return fetchReasons(reps.map((r) => r.runId), name).then((next) => { if (!cancelled) setReasons(next); });
+        const ids = reps.map((r) => r.runId);
+        return Promise.all([fetchReasons(ids, name), fetchLabels(ids, name)]).then(([nextReasons, nextLabels]) => {
+          if (!cancelled) { setReasons(nextReasons); setLabels(nextLabels); }
+        });
       })
       .catch((error) => { if (!cancelled) setLoadError(errorMessage(error)); });
     return () => { cancelled = true; };
@@ -81,6 +85,15 @@ export function AssertionDrilldown({ datasetId, exampleId, testName, name, kind,
             ) : null}
             {run.error ? <span className="text-error-primary">{run.error}</span> : null}
             {run.answer ? <span className="whitespace-pre-wrap text-primary"><span className="text-tertiary">Agent replied: </span>{run.answer}</span> : null}
+            {kind === 'assertion' && grade && grade.score !== null && !run.error ? (
+              <JudgeLabel judgedPass={grade.score === 1} label={labels[run.runId]}
+                onLabel={async (judgeRight) => {
+                  // The label is the RIGHT verdict: the judge's when it was right, the opposite when it wasn't.
+                  const correct = judgeRight === (grade.score === 1);
+                  const saved = await saveLabel(run.runId, name, correct, labels[run.runId]);
+                  setLabels((current) => ({ ...current, [run.runId]: saved }));
+                }} />
+            ) : null}
             {run.toolCalls.length ? <ToolCalls calls={run.toolCalls} /> : <span className="text-tertiary">No tool calls.</span>}
           </div>
         );
@@ -106,6 +119,28 @@ export function AssertionDrilldown({ datasetId, exampleId, testName, name, kind,
         <span className="text-tertiary">Re-grade needs the eval server (web mode).</span>
       )}
     </div>
+  );
+}
+
+// "Was the judge right?" Each answer is a labelled item for the judge bench (server/bench.py).
+function JudgeLabel({ judgedPass, label, onLabel }: { judgedPass: boolean; label?: Label; onLabel: (judgeRight: boolean) => Promise<void> }) {
+  const [saving, setSaving] = useState(false);
+  const judgeRight = label ? label.correct === judgedPass : null;
+  const click = async (right: boolean) => {
+    setSaving(true);
+    try { await onLabel(right); } finally { setSaving(false); }
+  };
+  const button = (right: boolean, text: string) => (
+    <button type="button" disabled={saving} onClick={() => void click(right)}
+      className={`rounded-sm border px-space-2 ${judgeRight === right ? 'border-focus bg-selected text-primary' : 'border-default text-secondary hover:text-primary'}`}>
+      {text}
+    </button>
+  );
+  return (
+    <span className="flex items-center gap-space-1 text-tertiary">
+      Judge right? {button(true, '✓ yes')} {button(false, '✗ no')}
+      {label ? <span>labelled: should {label.correct ? 'pass' : 'fail'}</span> : null}
+    </span>
   );
 }
 

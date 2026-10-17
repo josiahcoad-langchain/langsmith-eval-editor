@@ -440,6 +440,32 @@ export async function fetchReasons(runIds: string[], key: string): Promise<Recor
   return Object.fromEntries(pairs);
 }
 
+// --- Human labels: the right verdict for one assertion on one run, for the judge bench (server/bench.py) ---------
+
+const LABEL_KEY = 'human-label';
+export type Label = { feedbackId: string; correct: boolean };
+
+// One feedback item per (run, assertion): key human-label, score = the right verdict (1 pass, 0 fail), value = the
+// assertion's name. Read per run, like the reasons, because it is only needed for one test's newest repetitions.
+export async function fetchLabels(runIds: string[], name: string): Promise<Record<string, Label>> {
+  const pairs = await Promise.all(runIds.map(async (runId) => {
+    const page = await callLangSmith<unknown>('GET /api/v1/feedback', { params: { run: runId, key: LABEL_KEY, limit: '50' } });
+    const mine = (Array.isArray(page) ? page : []).filter(isRecord).find((f) => text(f.value) === name);
+    return mine ? [[runId, { feedbackId: text(mine.id), correct: mine.score === 1 }] as const] : [];
+  }));
+  return Object.fromEntries(pairs.flat());
+}
+
+export async function saveLabel(runId: string, name: string, correct: boolean, existing?: Label): Promise<Label> {
+  const score = correct ? 1 : 0;
+  if (existing) {
+    await callLangSmith(`PATCH /api/v1/feedback/${existing.feedbackId}`, { body: { score } });
+    return { ...existing, correct };
+  }
+  const created = await callLangSmith<unknown>('POST /api/v1/feedback', { body: { run_id: runId, key: LABEL_KEY, score, value: name } });
+  return { feedbackId: isRecord(created) ? text(created.id) : '', correct };
+}
+
 // --- Test status (the dot in the test list) ---------------------------------------------------------------------
 
 // pass: every assertion and check passed on every repetition. fail: some assertion or check failed on every
