@@ -29,6 +29,8 @@ from __future__ import annotations
 import inspect
 import json
 import os
+import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 
 from dotenv import load_dotenv
@@ -199,12 +201,39 @@ def assertions(inputs: dict, outputs: dict, reference_outputs: dict) -> dict:
     # A hook may grade assertions its own way, e.g. with a cheap yes/no classifier that hands only the cases it
     # is unsure of to a chat model. It returns one {name, passed, reason} per assertion.
     grade_assertions = getattr(hook, "grade_assertions", None)
-    grades = grade_assertions(tests, evidence) if grade_assertions else _judge_all(tests, evidence)
+    grades = _with_retries(lambda: grade_assertions(tests, evidence) if grade_assertions else _judge_all(tests, evidence))
     by_name = {g.name: g for g in grades}
     return {"results": [
         {"key": t["name"], "score": _score(by_name[t["name"]]) if t["name"] in by_name else None,
          "comment": by_name[t["name"]].reason if t["name"] in by_name else "The judge returned no grade."}
         for t in tests]}
+
+
+# A judge reached over the network fails transiently (2026-10-18: Jev and Luna ConnectTimeouts made three passing
+# repetitions of one test read as failed). Retried a couple of times; a run that still cannot be graded is
+# reported "ungraded" by the suite (suite.EVALUATOR_KEYS), never as the agent failing.
+_RETRIES = 3
+_RETRY_WAIT_SECONDS = 2.0
+
+
+def _with_retries(grade: Callable[[], list[Grade]]) -> list[Grade]:
+    for attempt in range(_RETRIES):
+        try:
+            return grade()
+        except Exception as error:  # noqa: BLE001 - re-raised below unless it is a network blip
+            if attempt == _RETRIES - 1 or not _transient(error):
+                raise
+            time.sleep(_RETRY_WAIT_SECONDS * (attempt + 1))
+    raise AssertionError("unreachable")
+
+
+def _transient(error: BaseException) -> bool:
+    # httpx, openai and anthropic each have their own timeout and connection error classes, and this module
+    # imports none of their SDKs, so they are recognised by name; a real bug (KeyError, a 400) is never retried.
+    if isinstance(error, (TimeoutError, ConnectionError)):
+        return True
+    names = {cls.__name__ for cls in type(error).__mro__}
+    return any("Timeout" in name or "Connect" in name for name in names)
 
 
 def _score(grade: Grade) -> int | None:

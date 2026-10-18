@@ -22,9 +22,14 @@ from dataclasses import dataclass, field
 from typing import Any
 
 # Verdicts, in the order the summary lists them (pytest's order).
-VERDICTS = ("failed", "error", "passed", "skipped", "xfailed", "xpassed")
+VERDICTS = ("failed", "error", "ungraded", "passed", "skipped", "xfailed", "xpassed")
 # Verdicts that make the suite fail.
-_BAD = {"failed", "error", "xpassed"}
+_BAD = {"failed", "error", "ungraded", "xpassed"}
+
+# The harness's evaluators (harness.assertions, harness.code_checks). LangSmith records an evaluator that RAISED
+# (a judge it could not reach) as feedback under the evaluator's own name, with no score. That is an outage, not a
+# verdict on the agent, unlike an assertion the judges were undecided about (its own key, score None).
+EVALUATOR_KEYS = frozenset({"assertions", "code_checks"})
 
 
 # Tests run at once (server and CLI; EVAL_PARALLEL overrides). Not "all": every agent run lives in one process, and
@@ -48,6 +53,12 @@ class Repetition:
     @property
     def passed(self) -> bool:
         return self.error is None and bool(self.scores) and all(score == 1 for score in self.scores.values())
+
+    @property
+    def ungraded(self) -> bool:
+        """An evaluator could not run (e.g. the judge timed out), and nothing it did grade failed."""
+        outage = any(key in EVALUATOR_KEYS and score is None for key, score in self.scores.items())
+        return self.error is None and outage and all(score in (1, None) for score in self.scores.values())
 
 
 @dataclass
@@ -112,7 +123,11 @@ def outcome(test: Test, repetitions: list[Repetition]) -> Outcome:
     threshold = float(meta.get("pass_threshold", 1.0))
     # Required passes, rounded up so 0.6 of 3 needs 2. A float slack keeps 2/3 >= 0.666 from rounding against us.
     ok = runs > 0 and passed >= math.ceil(threshold * runs - 1e-9)
-    result = Outcome(test, "passed" if ok else "failed", runs=runs, passed=passed, failing_keys=_failing_keys(repetitions))
+    # Short of passing only because a judge could not be reached: say so, rather than blame the agent. Still not a
+    # pass for CI (it is in _BAD), and one real failure beside it makes the test failed.
+    outage_only = any(rep.ungraded for rep in repetitions) and all(rep.passed or rep.ungraded for rep in repetitions)
+    verdict = "passed" if ok else "ungraded" if outage_only else "failed"
+    result = Outcome(test, verdict, runs=runs, passed=passed, failing_keys=_failing_keys(repetitions))
     if meta.get("xfail"):
         result.verdict = "xpassed" if ok else "xfailed"
         result.reason = str(meta["xfail"])
@@ -154,7 +169,7 @@ def junit_xml(outcomes: list[Outcome], suite_name: str) -> str:
     counts = Counter(o.verdict for o in outcomes)
     suite = ET.Element("testsuite", {
         "name": suite_name, "tests": str(len(outcomes)),
-        "failures": str(counts["failed"] + counts["xpassed"]), "errors": str(counts["error"]),
+        "failures": str(counts["failed"] + counts["xpassed"]), "errors": str(counts["error"] + counts["ungraded"]),
         "skipped": str(counts["skipped"] + counts["xfailed"]),
         "time": f"{sum(o.seconds for o in outcomes):.1f}",
     })
@@ -167,6 +182,9 @@ def junit_xml(outcomes: list[Outcome], suite_name: str) -> str:
             ET.SubElement(case, "failure", {"message": f"expected to fail ({o.reason}) but passed: remove the xfail"})
         elif o.verdict == "error":
             ET.SubElement(case, "error", {"message": o.error.splitlines()[0] if o.error else "errored"}).text = o.error
+        elif o.verdict == "ungraded":
+            # CI: an error (the grading broke), not a failure (the agent did not fall short).
+            ET.SubElement(case, "error", {"message": f"ungraded: a judge could not be reached on {o.runs - o.passed} of {o.runs} repetitions"})
         elif o.verdict in ("skipped", "xfailed"):
             ET.SubElement(case, "skipped", {"message": o.reason})
     return ET.tostring(suite, encoding="unicode")

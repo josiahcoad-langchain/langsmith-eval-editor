@@ -25,3 +25,36 @@ def test_an_errored_run_gets_no_grades():
     errored = {"output": None}
     assert harness.assertions({}, errored, reference) == {"results": []}
     assert harness.code_checks(errored, reference) == {"results": []}
+
+
+def test_a_judge_that_times_out_once_is_retried(monkeypatch):
+    # Given a grader whose first call times out (as Jev and Luna did, 2026-10-18), then answers
+    calls = []
+
+    def flaky(assertions, evidence):
+        calls.append(1)
+        if len(calls) == 1:
+            raise TimeoutError("ConnectTimeout")
+        return [harness.Grade(name="a", passed=True, reason="ok")]
+
+    monkeypatch.setattr(harness, "hook", type("H", (), {"grade_assertions": staticmethod(flaky)}))
+    monkeypatch.setattr(harness, "_RETRY_WAIT_SECONDS", 0)
+
+    # When the assertions are graded
+    result = harness.assertions({}, {"transcript": [], "answer": "hi"}, {"assertions": [{"name": "a", "assertion": "x"}]})
+
+    # Then the outage cost a retry, not a grade
+    assert len(calls) == 2 and result["results"][0]["score"] == 1
+
+
+def test_a_real_bug_in_the_grader_is_not_retried(monkeypatch):
+    calls = []
+
+    def broken(assertions, evidence):
+        calls.append(1)
+        raise KeyError("name")
+
+    monkeypatch.setattr(harness, "hook", type("H", (), {"grade_assertions": staticmethod(broken)}))
+    with pytest.raises(KeyError):
+        harness.assertions({}, {"transcript": [], "answer": "hi"}, {"assertions": [{"name": "a", "assertion": "x"}]})
+    assert len(calls) == 1

@@ -100,3 +100,30 @@ def test_junit_marks_failures_errors_and_skips():
     assert cases["b"].find("failure") is not None and "refund" in cases["b"].find("failure").text
     assert cases["c"].find("error") is not None
     assert cases["d"].find("skipped").get("message") == "stale"
+
+
+def test_a_judge_that_could_not_be_reached_makes_the_repetition_ungraded_not_failed():
+    # Given: every code check passed, but the assertions evaluator itself raised (LangSmith records that under
+    # the evaluator's name with no score), which is what a judge ConnectTimeout looks like
+    outage = Repetition(error=None, scores={"assertions": None, "opens-manage-plan": 1.0}, comments={"assertions": "ConnectTimeout('')"})
+    assert outage.ungraded and not outage.passed
+
+    # Then the test is ungraded, not failed, and CI still does not call it a pass
+    result = outcome(Test(id="t", name="cancel", metadata={}), [outage, outage, outage])
+    assert result.verdict == "ungraded"
+    assert exit_code([result]) == 1
+    # and JUnit reports it as an error (grading broke), not a failure (the agent fell short)
+    xml = ET.fromstring(junit_xml([result], suite_name="s"))
+    assert xml.get("errors") == "1" and xml.get("failures") == "0"
+
+
+def test_an_undecided_assertion_is_still_a_failure_not_an_outage():
+    undecided = Repetition(error=None, scores={"says-it-escalated": None}, comments={})
+    assert not undecided.ungraded
+    assert outcome(Test(id="t", name="x", metadata={}), [undecided]).verdict == "failed"
+
+
+def test_a_real_failure_beside_an_outage_is_still_a_failure():
+    outage = Repetition(error=None, scores={"assertions": None, "c": 1.0}, comments={})
+    failed = Repetition(error=None, scores={"c": 0.0}, comments={})
+    assert outcome(Test(id="t", name="x", metadata={}), [outage, failed]).verdict == "failed"

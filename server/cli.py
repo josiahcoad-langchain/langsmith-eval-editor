@@ -24,7 +24,7 @@ from langsmith import Client
 import harness
 from suite import DEFAULT_PARALLEL_TESTS, Outcome, Test, exit_code, junit_xml, outcome, select, status_of, summary_line
 
-_COLORS = {"passed": "32", "failed": "31", "error": "31", "xpassed": "31", "skipped": "33", "xfailed": "33"}
+_COLORS = {"passed": "32", "failed": "31", "error": "31", "ungraded": "33", "xpassed": "31", "skipped": "33", "xfailed": "33"}
 
 
 def main(argv: list[str] | None = None) -> int:
