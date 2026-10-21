@@ -64,7 +64,7 @@ Open http://localhost:8765. On first start the server creates the `eval-editor-d
 
 For UI work, `npm run dev:web` in `app/` serves the editor with hot reload on http://localhost:5173 and proxies `/api` to the server.
 
-To populate **Import** (turn a real run into a test), run the agent a few times; its traces go to the `eval-editor-demo-agent` project:
+To populate **Import** (turn a real run into a proposal; see [Proposals](#proposals-from-trace-to-test)), run the agent a few times; its traces go to the `eval-editor-demo-agent` project:
 
 ```bash
 cd server && uv run python demo_agent.py "Where is my order A1002?"
@@ -235,6 +235,26 @@ Then set the names in `server/.env` and `app/.env` (copy each `.env.example`): `
 - **Out of date.** A result stops counting as current when the test was edited after the run, or when the agent's code changed since. "Edited" compares a content hash of the test's inputs and assertions with the one the run recorded, so a new description or tag doesn't count. "The agent's code changed" means a commit since the run touched `EVAL_AGENT_PATHS` (space-separated git pathspecs; default the whole checkout), so a commit that only changes evals or docs leaves results current. Out-of-date dots and chips fade, and the header strikes the last run through with the reason and a **Run it again** link.
 - **Agent replies render as markdown** in the drill-down, the way a chat UI shows them.
 - **Judge right? yes / no.** Each graded repetition in the drill-down takes a label: was the judge's verdict right? It's saved as `human-label` feedback on the run (score = the right verdict, value = the assertion's name). Labels are what the judge bench measures judges against.
+
+## Proposals: from trace to test
+
+A proposal is a test that isn't part of the eval set yet. It's where a subject-matter expert shapes a real trace into a test: they write the assertions, fill in missing mocks, run it, and sharpen whatever the judge grades inconsistently. Once the grades hold, they accept it.
+
+```
+flagged trace ──run rule──► annotation queue ──open──► proposal (dataset example, status: proposal)
+                                                          │ add assertions · Run · refine
+                                                          ▼
+                                       Accept ──► test (status: active), run removed from the queue
+```
+
+- **The inbox** is an annotation queue, `eval-editor-demo-proposals` (`PROPOSALS_QUEUE` / `VITE_PROPOSALS_QUEUE`). The server creates it on start. The editor lists its runs at the top of the rail, under **Proposals**, marked *flagged*.
+- **Flagged traces get there by a run rule.** `uv run python proposals.py --rule` creates one on the agent's tracing project: every root run that gets `user_score = 0` feedback goes to the queue. Edit `FLAGGED_FILTER` in `server/proposals.py` to match the feedback your app writes. `proposals.py --add <run-id>` queues a run by hand.
+- **Opening a flagged trace imports it** as a proposal:
+  - The root run's last user message becomes the prompt (When), and every message before it becomes **History**, including the agent's earlier tool calls and their results. The agent is replayed into the same situation it was in.
+  - Each tool called during this turn becomes a mock. A tool called once returns that response for any arguments. A tool called several times with different arguments gets one case per argument set.
+  - **Import** (paste a trace link, or pick a recent run) makes a proposal the same way, without the queue.
+- **A proposal is a dataset example** with `metadata.status = "proposal"` (and `source_run_id`, `source_trace_id`). It runs exactly like a test, and its results stay with it after Accept. Run all, Run failing and `cli.py` leave proposals out; `cli.py --proposals` includes them, and naming one runs it.
+- **Accept into eval set** sets the status to `active` and takes the run out of the queue. **Delete proposal** deletes the example and takes the run out of the queue too, so it isn't proposed again. The **×** on a flagged trace dismisses it without importing it.
 
 ## Pick a judge: the bench
 

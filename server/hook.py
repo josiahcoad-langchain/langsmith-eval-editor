@@ -5,7 +5,8 @@ mocks, and returns the conversation as LangChain messages. The harness does the 
 assertions and code checks, failing the run if the agent called a tool the test doesn't mock, and logging an
 experiment.
 
-`history` (prior turns, [{role, content}]) and `context` (the test's own JSON for setting the agent up) are
+`history` (prior turns as LangChain message dicts: [{role, content}], with `tool_calls` on assistant turns and
+`role: "tool"` turns for their results) and `context` (the test's own JSON for setting the agent up) are
 passed only when the test sets them. Return the history messages first, then this turn's, so the harness can
 grade only what the agent did now. This demo agent has no use for `context`.
 

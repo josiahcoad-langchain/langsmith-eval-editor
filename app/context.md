@@ -30,12 +30,12 @@ A Given / When / Assert test editor for an agent, over one LangSmith dataset (de
 
 - `inputs`:
   - `prompt`
-  - `history?` (`[{role, content}]`)
+  - `history?` (`[{role, content}]`; an assistant turn may carry `tool_calls: [{id, name, args}]`, and a `tool` turn is one call's result, `{role: "tool", content, tool_call_id, name}`: LangChain message dicts)
   - `context?` (opaque JSON for the hook)
   - `recorded_on?`
   - `mock_tools`: `{tool: response | {"cases": [{when?, when_any_value?, response}]} | {"sequence": [...]} | {"raise": msg}}`
 - `outputs`: `assertions` (`[{name, assertion}]`) and `checks?` (`[{name, type, ...params}]`).
-- `metadata`: `name`, `description`, `dataset_split`.
+- `metadata`: `name`, `description`, `dataset_split`, and for proposals `status: "proposal"` (accepted: `"active"`), `source_run_id` (its annotation-queue run), `source_trace_id`.
 - Empty `history` / `context` / `checks` are left out.
 - Assertion, check and test names are lowercase-with-dashes (typed `_`/spaces convert). Assertions and checks share one namespace (feedback keys).
 
@@ -51,6 +51,8 @@ A Given / When / Assert test editor for an agent, over one LangSmith dataset (de
 - **Out of date** = the test was modified after the run's `dataset_version`, or the run's `git.commit` differs from the server's `agentCommit` (web only). It fades dots and chips and strikes the last-run line through.
 - **Cost estimate** = the newest experiment's `total_cost / run_count` × repetitions, the agent's model calls only. Tests with no priced run are counted, not guessed.
 - **The results badge** counts assertions that passed on every repetition; rows that passed on some say "flaky".
+
+- **Proposals live in the eval dataset**, flagged by `metadata.status`, not in a separate staging dataset, so a proposal's run history carries over when it's accepted. Accept PATCHes only `metadata`. The inbox is the annotation queue's runs minus those some example already names in `source_run_id`; the queue item is removed on Accept or Delete, not on import, so a half-shaped proposal stays queued. `promptAndHistory` (data.ts) reads a root run's messages in LangChain, OpenAI or serialized-`lc` shape.
 
 ## Gotchas
 

@@ -5,6 +5,7 @@
     uv run python cli.py -k refund                    names containing "refund" (-k "not refund" excludes)
     uv run python cli.py --tag gate                   tests tagged "gate" (metadata.tags), like pytest -m
     uv run python cli.py --lf                         only tests whose newest result failed, was flaky or errored
+    uv run python cli.py --proposals                  also run eval proposals (metadata.status "proposal")
     uv run python cli.py --tag gate --junit out.xml   for CI: JUnit report, exit code 1 on any failure
 
 Markers (skip, xfail, pass_threshold) live in each test's metadata; see suite.py. Exit codes follow pytest:
@@ -32,7 +33,7 @@ def main(argv: list[str] | None = None) -> int:
     client = Client()
     tests = _load_tests(client)
     chosen = select(tests, names=args.names or None, keyword=args.k, tags=args.tag or None,
-                    last_failed=_last_failed(client, tests) if args.lf else None)
+                    last_failed=_last_failed(client, tests) if args.lf else None, proposals=args.proposals)
     print(f"collected {len(tests)} tests, selected {len(chosen)} · {args.repetitions} repetition"
           f"{'' if args.repetitions == 1 else 's'} each · {args.parallel} at a time")
 
@@ -54,6 +55,7 @@ def _parse(argv: list[str] | None) -> argparse.Namespace:
     ap.add_argument("-k", help='substring of the test name, or "not <substring>"')
     ap.add_argument("--tag", action="append", help="only tests with this tag (repeatable: any of them)")
     ap.add_argument("--lf", action="store_true", help="only tests whose newest result failed, was flaky or errored")
+    ap.add_argument("--proposals", action="store_true", help="also run eval proposals, which are skipped by default")
     ap.add_argument("-r", "--repetitions", type=int, default=3)
     ap.add_argument("--parallel", type=int, default=int(os.environ.get("EVAL_PARALLEL") or DEFAULT_PARALLEL_TESTS),
                     help=f"tests run at once (default {DEFAULT_PARALLEL_TESTS}, or EVAL_PARALLEL)")

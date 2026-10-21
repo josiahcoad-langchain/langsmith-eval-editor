@@ -1,6 +1,6 @@
 // Everything the editor reads and writes in LangSmith. Every call goes through window.langsmith.call: inside
 // LangSmith that is the custom-app bridge, and in the web build it's a shim over the server's proxy (src/web.tsx).
-import { DATASET_NAME, TRACE_PROJECT } from '../config';
+import { DATASET_NAME, PROPOSALS_QUEUE, TRACE_PROJECT } from '../config';
 import { isResult, isRunning, statsFromRuns } from './experimentState';
 
 export type Json = Record<string, unknown>;
@@ -12,7 +12,10 @@ export type Example = { id: string; inputs: Json; outputs: Json; metadata: Json;
 export type MockCase = { key: string; when: string; response: string; anyValue?: string };
 export type MockTool = { key: string; tool: string; response: string; cases: MockCase[] | null };
 export type Assertion = { key: string; name: string; assertion: string };
-export type HistoryTurn = { key: string; role: 'user' | 'assistant'; content: string };
+// A turn of the conversation before the prompt. An assistant turn can carry the tool calls it made, and a `tool` turn
+// is one call's result, so a replayed thread gives the agent the same tool context it had (LangChain message dicts).
+export type ToolCall = { id: string; name: string; args: Json };
+export type HistoryTurn = { key: string; role: 'user' | 'assistant' | 'tool'; content: string; toolCalls?: ToolCall[]; toolCallId?: string; toolName?: string };
 // Code checks are deterministic (no judge). Params are kept as editable strings so half-typed values survive; `groups`
 // holds tool names (a group of several means "any of"), `json` the free-form part (args, or all of a custom check),
 // and `extra` any keys this editor doesn't know about so a save never drops them.
@@ -223,6 +226,23 @@ export function contextProblem(context: string) {
   return parseJsonObject(context).error ?? null;
 }
 
+function historyTurn(turn: Json): HistoryTurn {
+  const role = turn.role === 'assistant' || turn.role === 'tool' ? turn.role : 'user';
+  const toolCalls = Array.isArray(turn.tool_calls) ? turn.tool_calls.filter(isRecord).map((call) => ({
+    id: text(call.id), name: text(call.name), args: isRecord(call.args) ? call.args : {},
+  })) : [];
+  return {
+    key: keyId(), role, content: text(turn.content),
+    ...(toolCalls.length ? { toolCalls } : {}),
+    ...(role === 'tool' ? { toolCallId: text(turn.tool_call_id), toolName: text(turn.name) } : {}),
+  };
+}
+
+function historyPayload(turn: HistoryTurn): Json {
+  if (turn.role === 'tool') return { role: 'tool', content: turn.content, tool_call_id: turn.toolCallId ?? '', ...(turn.toolName ? { name: turn.toolName } : {}) };
+  return { role: turn.role, content: turn.content, ...(turn.toolCalls?.length ? { tool_calls: turn.toolCalls } : {}) };
+}
+
 export function toDraft(example: Example): Draft {
   const { inputs, outputs, metadata } = example;
   const mocks = isRecord(inputs.mock_tools) ? inputs.mock_tools : {};
@@ -246,7 +266,7 @@ export function toDraft(example: Example): Draft {
         })) ?? null,
       };
     }),
-    history: history.map((turn) => ({ key: keyId(), role: turn.role === 'assistant' ? 'assistant' : 'user', content: text(turn.content) })),
+    history: history.map(historyTurn),
     // Pretty-printed so a small object is readable; empty means the test has no context.
     context: isRecord(inputs.context) ? JSON.stringify(inputs.context, null, 2) : '',
     prompt: text(inputs.prompt),
@@ -306,7 +326,7 @@ export function toPayload(example: Example, draft: Draft): { payload?: Pick<Exam
   }
   if (draft.mockTools.length) inputs.mock_tools = mockTools;
   // Optional fields are omitted when empty, so a test that doesn't use them keeps its old shape.
-  const history = draft.history.filter((turn) => turn.content.trim()).map((turn) => ({ role: turn.role, content: turn.content }));
+  const history = draft.history.filter((turn) => turn.content.trim() || turn.toolCalls?.length).map(historyPayload);
   if (history.length) inputs.history = history;
   const context = parseJsonObject(draft.context).value;
   if (context && Object.keys(context).length) inputs.context = context;
@@ -632,11 +652,46 @@ export function staleness(summary: TestSummary | undefined, currentHash: string 
 
 export type PastRun = { traceId: string; prompt: string; start: string; hidden: boolean };
 
+// A traced message, in whichever shape the tracer stored it: a LangChain message dict ({type, content, ...}), an
+// OpenAI-style dict ({role, content}), or LangChain's serialized form ({lc, id: [..., "HumanMessage"], kwargs}).
+type TracedMessage = { role: 'user' | 'assistant' | 'tool' | 'system'; content: string; toolCalls: ToolCall[]; toolCallId: string; toolName: string };
+
+function tracedMessage(raw: Json): TracedMessage {
+  const m = isRecord(raw.kwargs) && Array.isArray(raw.id) ? { ...raw.kwargs, type: String(raw.id[raw.id.length - 1]) } : raw;
+  const kind = text(m.type || m.role).toLowerCase();
+  const role = /human|user/.test(kind) ? 'user' : /ai|assistant/.test(kind) ? 'assistant' : /tool|function/.test(kind) ? 'tool' : 'system';
+  const blocks = Array.isArray(m.content) ? m.content.filter(isRecord) : [];
+  const content = typeof m.content === 'string' ? m.content : blocks.filter((b) => !b.type || b.type === 'text').map((b) => text(b.text)).join('');
+  // Tool calls are on `tool_calls` in LangChain's format; Anthropic-style content also carries them as tool_use blocks.
+  const listed = Array.isArray(m.tool_calls) ? m.tool_calls.filter(isRecord) : [];
+  const toolCalls = (listed.length ? listed.map((c) => ({ id: text(c.id), name: text(c.name), args: isRecord(c.args) ? c.args : {} }))
+    : blocks.filter((b) => b.type === 'tool_use').map((b) => ({ id: text(b.id), name: text(b.name), args: isRecord(b.input) ? b.input : {} })));
+  return { role, content, toolCalls, toolCallId: text(m.tool_call_id), toolName: text(m.name) };
+}
+
+function tracedMessages(inputs: unknown): TracedMessage[] {
+  const raw = isRecord(inputs) && Array.isArray(inputs.messages) ? inputs.messages : [];
+  // A chat-model run nests its messages one level deeper ([[...]]).
+  const flat = raw.length === 1 && Array.isArray(raw[0]) ? raw[0] : raw;
+  return flat.filter(isRecord).map(tracedMessage);
+}
+
+// Splits a root run's input messages into the prompt (the last user message) and everything before it.
+export function promptAndHistory(inputs: unknown): { prompt: string; history: HistoryTurn[] } {
+  const messages = tracedMessages(inputs);
+  const last = messages.map((m) => m.role).lastIndexOf('user');
+  if (last === -1) return { prompt: '', history: [] };
+  const history = messages.slice(0, last).filter((m) => m.role !== 'system' && (m.content.trim() || m.toolCalls.length || m.role === 'tool'))
+    .map((m): HistoryTurn => ({
+      key: keyId(), role: m.role as HistoryTurn['role'], content: m.content,
+      ...(m.toolCalls.length ? { toolCalls: m.toolCalls } : {}),
+      ...(m.role === 'tool' ? { toolCallId: m.toolCallId, toolName: m.toolName } : {}),
+    }));
+  return { prompt: messages[last].content, history };
+}
+
 function humanPrompt(inputs: unknown) {
-  const messages = isRecord(inputs) && Array.isArray(inputs.messages) ? inputs.messages.filter(isRecord) : [];
-  const human = [...messages].reverse().find((m) => m.type === 'human' || m.role === 'user');
-  const content = human?.content;
-  return typeof content === 'string' ? content : Array.isArray(content) ? content.filter(isRecord).map((part) => text(part.text)).join('') : '';
+  return promptAndHistory(inputs).prompt;
 }
 
 async function queryAll(body: Json) {
@@ -721,18 +776,19 @@ export async function importTrace(traceId: string, agentTools: string[]) {
     cases: calls.length === 1 ? null : calls.map((call) => ({ key: keyId(), when: JSON.stringify(call.args), response: responseText(call.response) })),
   }));
   const started = text(root.start_time).slice(0, 10);
+  const { prompt, history } = promptAndHistory(root.inputs);
   const draft: Draft = {
     name: `trace-${traceId.slice(0, 8)}`,
     description: `Imported from trace ${traceId} (${started}).`,
-    prompt: humanPrompt(root.inputs),
+    prompt,
     mockTools,
-    history: [],
+    history,
     context: '',
     assertions: [{ key: keyId(), name: '', assertion: '' }],
     checks: [],
     splits: ['base'],
   };
-  return { draft, recordedOn: started, toolCalls: toolRuns.length };
+  return { draft, recordedOn: started, toolCalls: toolRuns.length, rootRunId: text(root.id) };
 }
 
 // --- Formatting ----------------------------------------------------------------------------------------------
@@ -770,4 +826,54 @@ export async function openTrace(result: Pick<TestResult, 'runId' | 'experimentId
     params: { project_id: result.experimentId, trace_id: result.traceId },
   });
   if (response?.url) window.langsmith.openUrl(response.url, { newTab: true });
+}
+
+// --- Proposals ------------------------------------------------------------------------------------------------
+// A proposal is a test that isn't part of the eval set yet: a dataset example with metadata.status = "proposal".
+// Flagged traces arrive in an annotation queue (PROPOSALS_QUEUE); opening one imports it as a proposal that
+// remembers its queue run (metadata.source_run_id). Accept makes it a test and takes the run out of the queue.
+
+export function isProposal(example: Example) {
+  return example.metadata.status === 'proposal';
+}
+
+export type QueuedRun = { runId: string; traceId: string; prompt: string; turns: number; start: string; hidden: boolean };
+
+// The queue's id, or null when it doesn't exist (the server creates it on start; see server/proposals.py).
+export async function fetchProposalQueue(): Promise<string | null> {
+  const rows = await callLangSmith<unknown>('GET /api/v1/annotation-queues', { params: { name: PROPOSALS_QUEUE } });
+  const queue = (Array.isArray(rows) ? rows : []).filter(isRecord).find((q) => q.name === PROPOSALS_QUEUE);
+  return queue ? text(queue.id) : null;
+}
+
+export async function fetchQueuedRuns(queueId: string): Promise<QueuedRun[]> {
+  const rows = await callLangSmith<unknown>(`GET /api/v1/annotation-queues/${queueId}/runs`, { params: { limit: '100' } });
+  return (Array.isArray(rows) ? rows : []).filter(isRecord).map((run) => {
+    const { prompt, history } = promptAndHistory(run.inputs);
+    return {
+      runId: text(run.id), traceId: text(run.trace_id) || text(run.id), prompt, turns: history.filter((t) => t.role === 'user').length,
+      start: text(run.start_time), hidden: run.inputs == null,
+    };
+  }).sort((a, b) => b.start.localeCompare(a.start));
+}
+
+export async function removeFromQueue(queueId: string, runId: string) {
+  await callLangSmith(`DELETE /api/v1/annotation-queues/${queueId}/runs/${runId}`);
+}
+
+// A new, unsaved proposal from an imported trace; autosave creates the example once it's valid.
+export function proposalExample(prompt: string, recordedOn: string, traceId: string, runId?: string): Example {
+  const example = emptyExample();
+  return {
+    ...example,
+    inputs: { prompt, recorded_on: recordedOn },
+    metadata: { ...example.metadata, status: 'proposal', source_trace_id: traceId, ...(runId ? { source_run_id: runId } : {}) },
+  };
+}
+
+// Accept: the proposal becomes a test. Only metadata changes, so its results stay current.
+export async function acceptProposal(example: Example): Promise<Example> {
+  const metadata = { ...example.metadata, status: 'active' };
+  await callLangSmith(`PATCH /api/v1/examples/${example.id}`, { body: { metadata } });
+  return { ...example, metadata };
 }

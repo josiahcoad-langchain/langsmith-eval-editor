@@ -39,6 +39,7 @@ load_dotenv()
 
 import attach  # noqa: E402
 import harness  # noqa: E402
+import proposals  # noqa: E402
 import regrade  # noqa: E402
 import run_queue  # noqa: E402
 import seed  # noqa: E402
@@ -60,6 +61,7 @@ _dataset_url = ""
 def startup() -> None:
     global _dataset_url
     _dataset_url = seed.ensure_dataset(client).url
+    proposals.ensure_queue(client)
     run_queue.init(client)
 
 
