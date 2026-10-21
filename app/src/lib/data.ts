@@ -1,15 +1,26 @@
 // Everything the editor reads and writes in LangSmith. Every call goes through window.langsmith.call: inside
 // LangSmith that is the custom-app bridge, and in the web build it's a shim over the server's proxy (src/web.tsx).
 import { DATASET_NAME, TRACE_PROJECT } from '../config';
+import { isResult, isRunning, statsFromRuns } from './experimentState';
 
 export type Json = Record<string, unknown>;
 
-export type Example = { id: string; inputs: Json; outputs: Json; metadata: Json; isNew?: boolean };
+// `modifiedAt` is when the test last changed, to tell a result produced by an older version of it from a current one.
+export type Example = { id: string; inputs: Json; outputs: Json; metadata: Json; isNew?: boolean; modifiedAt?: string };
 // A mock is one response for any arguments, or (cases set) the first case whose `when` matches the call's arguments.
-export type MockCase = { key: string; when: string; response: string };
+// `anyValue` is the other matcher: the case applies when any argument equals that string (`when_any_value`).
+export type MockCase = { key: string; when: string; response: string; anyValue?: string };
 export type MockTool = { key: string; tool: string; response: string; cases: MockCase[] | null };
 export type Assertion = { key: string; name: string; assertion: string };
-export type Draft = { name: string; description: string; mockTools: MockTool[]; prompt: string; assertions: Assertion[]; splits: string[] };
+export type HistoryTurn = { key: string; role: 'user' | 'assistant'; content: string };
+// Code checks are deterministic (no judge). Params are kept as editable strings so half-typed values survive; `groups`
+// holds tool names (a group of several means "any of"), `json` the free-form part (args, or all of a custom check),
+// and `extra` any keys this editor doesn't know about so a save never drops them.
+export type Check = { key: string; name: string; type: string; max: string; tool: string; first: string; second: string; groups: string[][]; json: string; extra: Json };
+export type Draft = {
+  name: string; description: string; mockTools: MockTool[]; history: HistoryTurn[]; context: string; prompt: string;
+  assertions: Assertion[]; checks: Check[]; splits: string[];
+};
 export type Dataset = { id: string; tools: string[] };
 
 export function isRecord(value: unknown): value is Json {
@@ -69,6 +80,7 @@ function toExample(raw: unknown): Example | null {
     inputs: isRecord(raw.inputs) ? raw.inputs : {},
     outputs: isRecord(raw.outputs) ? raw.outputs : {},
     metadata: isRecord(raw.metadata) ? raw.metadata : {},
+    modifiedAt: text(raw.modified_at) || text(raw.created_at),
   };
 }
 
@@ -92,7 +104,8 @@ export async function saveExampleTo(datasetId: string, example: Example, payload
     return toExample(response) ?? { id: example.id, ...payload };
   }
   await callLangSmith(`PATCH /api/v1/examples/${example.id}`, { body: payload });
-  return { id: example.id, ...payload };
+  // Stamped here rather than re-read, so a result goes out of date the moment the edit is saved.
+  return { id: example.id, ...payload, modifiedAt: new Date().toISOString() };
 }
 
 export async function deleteExample(id: string) {
@@ -130,10 +143,92 @@ export function parseResponse(response: string): unknown {
   }
 }
 
+// --- Code checks ---------------------------------------------------------------------------------------------
+
+export const CHECK_TYPES = ['must_call', 'must_not_call', 'max_tool_calls', 'max_tool_rounds', 'must_call_before', 'must_call_with_values', 'max_prompt_tokens', 'max_model_calls', 'custom'] as const;
+// Keys each type owns; anything else on a saved check rides along in `extra`.
+const CHECK_KEYS: Record<string, string[]> = {
+  must_call: ['tools'], must_not_call: ['tools'], max_tool_calls: ['max', 'tool'], max_tool_rounds: ['max'],
+  must_call_before: ['first', 'second'], must_call_with_values: ['tool', 'args'], max_prompt_tokens: ['max'], max_model_calls: ['max'],
+};
+
+export function emptyCheck(type = 'must_call'): Check {
+  return { key: keyId(), name: '', type, max: '', tool: '', first: '', second: '', groups: [], json: '', extra: {} };
+}
+
+function toCheck(row: Json): Check {
+  const type = text(row.type) || 'custom';
+  const check = { ...emptyCheck(type), name: text(row.name) };
+  const owned = CHECK_KEYS[type];
+  const { name: _name, type: _type, ...rest } = row;
+  // custom, and a type this editor doesn't know, is edited as one JSON object.
+  if (!owned) return { ...check, json: Object.keys(rest).length ? JSON.stringify(rest, null, 2) : '' };
+  if (Array.isArray(row.tools)) check.groups = row.tools.map((tool) => (Array.isArray(tool) ? tool.map(String) : [String(tool)]));
+  if (row.max !== undefined) check.max = String(row.max);
+  check.tool = text(row.tool);
+  check.first = text(row.first);
+  check.second = text(row.second);
+  if (row.args !== undefined) check.json = JSON.stringify(row.args, null, 2);
+  check.extra = Object.fromEntries(Object.entries(rest).filter(([key]) => !owned.includes(key)));
+  return check;
+}
+
+export function parseJsonObject(source: string): { value?: Json; error?: string } {
+  if (!source.trim()) return { value: {} };
+  try {
+    const value: unknown = JSON.parse(source);
+    return isRecord(value) ? { value } : { error: 'Must be a JSON object, like {"key": "value"}.' };
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : 'Not valid JSON.' };
+  }
+}
+
+// What is wrong with a check, if anything, in words fit for the inline error under it.
+export function checkProblem(check: Check): string | null {
+  const needsMax = ['max_tool_calls', 'max_tool_rounds', 'max_prompt_tokens', 'max_model_calls'].includes(check.type);
+  if (needsMax && (!check.max.trim() || !Number.isFinite(Number(check.max)) || Number(check.max) < 0)) return 'Max must be a number, 0 or more.';
+  if ((check.type === 'must_call' || check.type === 'must_not_call') && !check.groups.some((group) => group.length)) return 'Pick at least one tool.';
+  if (check.type === 'must_call_before' && (!check.first || !check.second)) return 'Pick both tools.';
+  if (check.type === 'must_call_with_values') {
+    if (!check.tool) return 'Pick a tool.';
+    const { error } = parseJsonObject(check.json);
+    if (error) return `Args: ${error}`;
+  }
+  if (!CHECK_KEYS[check.type]) {
+    const { error } = parseJsonObject(check.json);
+    if (error) return error;
+  }
+  return null;
+}
+
+function checkPayload(check: Check): Json {
+  const base = { name: check.name.trim(), type: check.type };
+  const max = Number(check.max);
+  switch (check.type) {
+    case 'must_call': return { ...check.extra, ...base, tools: check.groups.filter((g) => g.length).map((g) => (g.length === 1 ? g[0] : g)) };
+    case 'must_not_call': return { ...check.extra, ...base, tools: check.groups.flat() };
+    case 'max_tool_calls': return { ...check.extra, ...base, max, ...(check.tool ? { tool: check.tool } : {}) };
+    case 'must_call_before': return { ...check.extra, ...base, first: check.first, second: check.second };
+    case 'must_call_with_values': return { ...check.extra, ...base, tool: check.tool, args: parseJsonObject(check.json).value ?? {} };
+    case 'max_tool_rounds': case 'max_prompt_tokens': case 'max_model_calls': return { ...check.extra, ...base, max };
+    default: return { ...(parseJsonObject(check.json).value ?? {}), ...base };
+  }
+}
+
+export function historyChars(history: HistoryTurn[]) {
+  return history.reduce((sum, turn) => sum + turn.content.length, 0);
+}
+
+export function contextProblem(context: string) {
+  return parseJsonObject(context).error ?? null;
+}
+
 export function toDraft(example: Example): Draft {
   const { inputs, outputs, metadata } = example;
   const mocks = isRecord(inputs.mock_tools) ? inputs.mock_tools : {};
   const assertions = Array.isArray(outputs.assertions) ? outputs.assertions.filter(isRecord) : [];
+  const history = Array.isArray(inputs.history) ? inputs.history.filter(isRecord) : [];
+  const checks = Array.isArray(outputs.checks) ? outputs.checks.filter(isRecord) : [];
   return {
     name: text(metadata.name),
     description: text(metadata.description),
@@ -143,11 +238,20 @@ export function toDraft(example: Example): Draft {
         key: keyId(),
         tool,
         response: cases ? '' : responseText(value),
-        cases: cases?.map((row) => ({ key: keyId(), when: isRecord(row.when) ? JSON.stringify(row.when) : '', response: responseText(row.response) })) ?? null,
+        cases: cases?.map((row) => ({
+          key: keyId(),
+          when: isRecord(row.when) ? JSON.stringify(row.when) : '',
+          response: responseText(row.response),
+          ...(typeof row.when_any_value === 'string' ? { anyValue: row.when_any_value } : {}),
+        })) ?? null,
       };
     }),
+    history: history.map((turn) => ({ key: keyId(), role: turn.role === 'assistant' ? 'assistant' : 'user', content: text(turn.content) })),
+    // Pretty-printed so a small object is readable; empty means the test has no context.
+    context: isRecord(inputs.context) ? JSON.stringify(inputs.context, null, 2) : '',
     prompt: text(inputs.prompt),
     assertions: assertions.map((row) => ({ key: keyId(), name: text(row.name), assertion: text(row.assertion) })),
+    checks: checks.map(toCheck),
     splits: strings(metadata.dataset_split),
   };
 }
@@ -158,17 +262,25 @@ export function toPayload(example: Example, draft: Draft): { payload?: Pick<Exam
   if (!draft.prompt.trim()) return { error: 'Write the prompt (When).' };
   // A fully blank row (new and imported tests start with one) is left out rather than blocking the save.
   const assertions = draft.assertions.filter((row) => row.name.trim() || row.assertion.trim());
-  const names = assertions.map((row) => row.name.trim());
-  if (names.some((name) => !name)) return { error: 'Every assertion needs a name.' };
-  if (names.includes('all-tools-mocked')) return { error: '"all-tools-mocked" is reserved for the built-in check.' };
+  if (assertions.some((row) => !row.name.trim())) return { error: 'Every assertion needs a name.' };
+  if (draft.checks.some((check) => !check.name.trim())) return { error: 'Every check needs a name.' };
+  // Assertions and checks share one namespace: each name becomes a LangSmith feedback key.
+  const names = [...assertions.map((row) => row.name.trim()), ...draft.checks.map((check) => check.name.trim())];
   const dupe = names.find((name, index) => names.indexOf(name) !== index);
-  if (dupe) return { error: `Two assertions are named "${dupe}".` };
+  if (dupe) return { error: `Two assertions or checks are named "${dupe}".` };
+  for (const check of draft.checks) {
+    const problem = checkProblem(check);
+    if (problem) return { error: `Check "${check.name}": ${problem}` };
+  }
+  const contextError = contextProblem(draft.context);
+  if (contextError) return { error: `Context: ${contextError}` };
   if (draft.mockTools.some((mock) => !mock.tool)) return { error: 'Pick a tool for every mock.' };
   const tools = draft.mockTools.map((mock) => mock.tool);
   const dupeTool = tools.find((tool, index) => tools.indexOf(tool) !== index);
   if (dupeTool) return { error: `${dupeTool} is mocked twice.` };
 
-  const { mock_tools: _mocks, ...inputs } = example.inputs;
+  const { mock_tools: _mocks, history: _history, context: _context, ...inputs } = example.inputs;
+  const { checks: _checks, ...outputs } = example.outputs;
   const mockTools: Json = {};
   for (const mock of draft.mockTools) {
     if (!mock.cases) {
@@ -184,15 +296,28 @@ export function toPayload(example: Example, draft: Draft): { payload?: Pick<Exam
         return { error: `${mock.tool}: a case's "when" isn't valid JSON.` };
       }
       if (when !== undefined && !isRecord(when)) return { error: `${mock.tool}: "when" must be an object like {"order_id": "A1001"}.` };
-      cases.push(when ? { when, response: parseResponse(row.response) } : { response: parseResponse(row.response) });
+      cases.push({
+        ...(when ? { when } : {}),
+        ...(row.anyValue !== undefined ? { when_any_value: row.anyValue } : {}),
+        response: parseResponse(row.response),
+      });
     }
     mockTools[mock.tool] = { cases };
   }
   if (draft.mockTools.length) inputs.mock_tools = mockTools;
+  // Optional fields are omitted when empty, so a test that doesn't use them keeps its old shape.
+  const history = draft.history.filter((turn) => turn.content.trim()).map((turn) => ({ role: turn.role, content: turn.content }));
+  if (history.length) inputs.history = history;
+  const context = parseJsonObject(draft.context).value;
+  if (context && Object.keys(context).length) inputs.context = context;
   return {
     payload: {
       inputs: { ...inputs, prompt: draft.prompt },
-      outputs: { ...example.outputs, assertions: assertions.map((row) => ({ name: row.name.trim(), assertion: row.assertion })) },
+      outputs: {
+        ...outputs,
+        assertions: assertions.map((row) => ({ name: row.name.trim(), assertion: row.assertion })),
+        ...(draft.checks.length ? { checks: draft.checks.map(checkPayload) } : {}),
+      },
       metadata: { ...example.metadata, name: draft.name.trim(), description: draft.description, dataset_split: draft.splits },
     },
   };
@@ -226,7 +351,9 @@ export function isDirty(example: Example, draft: Draft) {
 export type AssertionResult = { key: string; score: number | null; comment: string };
 export type TestResult = {
   runId: string; traceId: string; experimentId: string; experimentName: string;
-  start: string; end: string; status: string; error: string; answer: string; assertions: AssertionResult[];
+  start: string; end: string; status: string; error: string; traceback: string; answer: string; assertions: AssertionResult[];
+  // What the agent called this run, with arguments and results, for reading a grade against what it actually did.
+  toolCalls: Json[];
 };
 
 function feedbackComment(stats: Json) {
@@ -235,10 +362,37 @@ function feedbackComment(stats: Json) {
   return typeof comments === 'string' ? comments : '';
 }
 
+// The test (example) an experiment ran: the harness writes it into the experiment's metadata.
+function experimentExampleId(experiment: Json) {
+  const extra = isRecord(experiment.extra) ? experiment.extra : {};
+  const metadata = isRecord(extra.metadata) ? extra.metadata : {};
+  return text(metadata.example_id);
+}
+
+// LangSmith's run error is `repr(exception)` followed by the traceback. The first part is what a person reads
+// ("`create_reel` is not a tool Max has: ..."); the traceback is for debugging the hook.
+export function readableError(error: string) {
+  const head = error.split('\n\nTraceback')[0].trim();
+  const wrapped = /^\w+\((["'])([\s\S]*)\1\)$/.exec(head);
+  return (wrapped ? wrapped[2] : head).replace(/\\(["'])/g, '$1').trim();
+}
+
+export function tracebackOf(error: string) {
+  const at = error.indexOf('Traceback (most recent call last)');
+  return at === -1 ? '' : error.slice(at).trim();
+}
+
 // Every experiment run of one test (example), newest first, with its per-assertion scores.
-export async function fetchResults(datasetId: string, exampleId: string): Promise<TestResult[]> {
-  const sessions = await callLangSmith<unknown>('GET /api/v1/sessions', { params: { reference_dataset: datasetId, limit: '50' } });
-  const experiments = (Array.isArray(sessions) ? sessions : []).filter(isRecord);
+//
+// Asks for THIS test's experiments (the harness names them `<test name>-<suffix>`), then keeps the ones whose
+// metadata names this example. Fetching "the dataset's 50 newest experiments" and filtering after looked fine
+// on a small dataset and showed "No runs" for every test once the dataset had run more than 50.
+export async function fetchResults(datasetId: string, exampleId: string, testName: string): Promise<TestResult[]> {
+  const params: Record<string, string> = { reference_dataset: datasetId, limit: '50' };
+  if (testName) params.name_contains = testName;
+  const sessions = await callLangSmith<unknown>('GET /api/v1/sessions', { params });
+  const experiments = (Array.isArray(sessions) ? sessions : []).filter(isRecord)
+    .filter((experiment) => !experimentExampleId(experiment) || experimentExampleId(experiment) === exampleId);
   if (!experiments.length) return [];
   const names = new Map(experiments.map((e) => [text(e.id), text(e.name)]));
   const page = await callLangSmith<unknown>(`POST /api/v2/datasets/${datasetId}/experiment-runs`, {
@@ -246,7 +400,8 @@ export async function fetchResults(datasetId: string, exampleId: string): Promis
       experiment_ids: [...names.keys()],
       example_ids: [exampleId],
       page_size: 50,
-      selects: ['ID', 'TRACE_ID', 'PROJECT_ID', 'START_TIME', 'END_TIME', 'STATUS', 'ERROR_PREVIEW', 'OUTPUTS', 'FEEDBACK_STATS'],
+      // ERROR, not ERROR_PREVIEW: the endpoint silently ignores ERROR_PREVIEW, so every errored run showed no reason.
+      selects: ['ID', 'TRACE_ID', 'PROJECT_ID', 'START_TIME', 'END_TIME', 'STATUS', 'ERROR', 'OUTPUTS', 'FEEDBACK_STATS'],
     },
   });
   const items = isRecord(page) && Array.isArray(page.items) ? page.items.filter(isRecord) : [];
@@ -262,14 +417,215 @@ export async function fetchResults(datasetId: string, exampleId: string): Promis
       start: text(run.start_time),
       end: text(run.end_time),
       status: text(run.status),
-      error: text(run.error_preview),
+      error: readableError(text(run.error) || text(run.error_preview)),
+      traceback: tracebackOf(text(run.error)),
       answer: text(outputs.answer).trim(),
+      toolCalls: Array.isArray(outputs.tool_calls) ? outputs.tool_calls.filter(isRecord) : [],
       assertions: Object.entries(stats).filter(([, v]) => isRecord(v)).map(([key, v]) => {
         const stat = v as Json;
         return { key, score: typeof stat.avg === 'number' ? stat.avg : null, comment: feedbackComment(stat) };
       }),
     };
   }).sort((a, b) => b.start.localeCompare(a.start));
+}
+
+// The judge's reason for one key on each run. The experiment-runs endpoint's FEEDBACK_STATS carries scores but
+// `comments: null`, so a reason has to come from the feedback itself. One request per run: fine for one test's
+// newest experiment (its few repetitions), too many for every run ever, so the drill-down asks, not the list.
+export async function fetchReasons(runIds: string[], key: string): Promise<Record<string, string>> {
+  const pairs = await Promise.all(runIds.map(async (runId) => {
+    const page = await callLangSmith<unknown>('GET /api/v1/feedback', { params: { run: runId, key, limit: '5' } });
+    const first = (Array.isArray(page) ? page : []).filter(isRecord)[0];
+    return [runId, first ? text(first.comment) : ''] as const;
+  }));
+  return Object.fromEntries(pairs);
+}
+
+// --- Human labels: the right verdict for one assertion on one run, for the judge bench (server/bench.py) ---------
+
+const LABEL_KEY = 'human-label';
+export type Label = { feedbackId: string; correct: boolean };
+
+// One feedback item per (run, assertion): key human-label, score = the right verdict (1 pass, 0 fail), value = the
+// assertion's name. Read per run, like the reasons, because it is only needed for one test's newest repetitions.
+export async function fetchLabels(runIds: string[], name: string): Promise<Record<string, Label>> {
+  const pairs = await Promise.all(runIds.map(async (runId) => {
+    const page = await callLangSmith<unknown>('GET /api/v1/feedback', { params: { run: runId, key: LABEL_KEY, limit: '50' } });
+    const mine = (Array.isArray(page) ? page : []).filter(isRecord).find((f) => text(f.value) === name);
+    return mine ? [[runId, { feedbackId: text(mine.id), correct: mine.score === 1 }] as const] : [];
+  }));
+  return Object.fromEntries(pairs.flat());
+}
+
+export async function saveLabel(runId: string, name: string, correct: boolean, existing?: Label): Promise<Label> {
+  const score = correct ? 1 : 0;
+  if (existing) {
+    await callLangSmith(`PATCH /api/v1/feedback/${existing.feedbackId}`, { body: { score } });
+    return { ...existing, correct };
+  }
+  const created = await callLangSmith<unknown>('POST /api/v1/feedback', { body: { run_id: runId, key: LABEL_KEY, score, value: name } });
+  return { feedbackId: isRecord(created) ? text(created.id) : '', correct };
+}
+
+// --- Test status (the dot in the test list) ---------------------------------------------------------------------
+
+// pass: every assertion and check passed on every repetition. fail: some assertion or check failed on every
+// repetition. flaky: anything in between. error: every run raised (e.g. an incomplete test). none: never run.
+export type TestStatus = 'pass' | 'fail' | 'flaky' | 'error' | 'none';
+
+// A test's newest run, as the list needs it. `costPerRun` is that experiment's LangSmith-priced agent cost divided
+// by its runs (the agent's model calls only: graders trace elsewhere); null when the test has never been priced.
+// `keys` is each assertion's and check's result on that run (passed of n repetitions), for the chip beside it.
+export type KeyResult = { passed: number; n: number };
+export type TestSummary = {
+  status: TestStatus; costPerRun: number | null; keys: Record<string, KeyResult>; ranAt: string;
+  runs: number; totalCost: number | null; latencyP50: number | null;
+  // What the test asked when it ran (content hash; '' for runs from before it was recorded), the dataset's
+  // version then, and the agent commit it ran on.
+  testHash: string; testVersion: string; agentCommit: string;
+  // A run of this test started somewhere (CLI, CI, another editor) and has no grades yet.
+  runningElsewhere?: boolean;
+};
+
+function summaryOf(experiment: Json): TestSummary {
+  const cost = typeof experiment.total_cost === 'number' ? experiment.total_cost : null;
+  const runs = typeof experiment.run_count === 'number' && experiment.run_count > 0 ? experiment.run_count : null;
+  const keys: Record<string, KeyResult> = {};
+  for (const [key, stat] of Object.entries(isRecord(experiment.feedback_stats) ? experiment.feedback_stats : {})) {
+    if (!isRecord(stat) || typeof stat.n !== 'number' || typeof stat.avg !== 'number') continue;
+    keys[key] = { passed: Math.round(stat.avg * stat.n), n: stat.n };
+  }
+  const extra = isRecord(experiment.extra) ? experiment.extra : {};
+  const metadata = isRecord(extra.metadata) ? extra.metadata : {};
+  const git = isRecord(metadata.git) ? metadata.git : {};
+  return {
+    status: statusOf(experiment),
+    costPerRun: cost !== null && runs !== null && cost > 0 ? cost / runs : null,
+    keys,
+    ranAt: text(experiment.start_time),
+    runs: runs ?? 0,
+    totalCost: cost,
+    latencyP50: typeof experiment.latency_p50 === 'number' ? experiment.latency_p50 : null,
+    testHash: text(metadata.test_hash),
+    testVersion: text(metadata.dataset_version) || text(experiment.start_time),
+    agentCommit: text(git.commit),
+  };
+}
+
+function statusOf(experiment: Json): TestStatus {
+  const errorRate = typeof experiment.error_rate === 'number' ? experiment.error_rate : 0;
+  if (errorRate >= 1) return 'error';
+  const stats = Object.values(isRecord(experiment.feedback_stats) ? experiment.feedback_stats : {}).filter(isRecord);
+  if (!stats.length) return 'none';
+  if (stats.some((stat) => stat.max === 0)) return 'fail';
+  if (errorRate > 0 || stats.some((stat) => stat.min !== 1)) return 'flaky';
+  return 'pass';
+}
+
+// The status of every test's newest experiment, by example id.
+//
+// Each test's runs are their own experiment, and an experiment's list entry carries its per-key min/max
+// (include_stats), so no per-test calls are needed. Pages come newest first and the scan stops as soon as every
+// test in `exampleIds` has a status, so it costs one page (~0.6s) however many experiments the dataset has run.
+// A test that has never run is the only thing that makes it read every page. `onPage` gets the statuses so far,
+// so dots appear while later pages load.
+export async function fetchStatuses(
+  datasetId: string,
+  exampleIds: string[],
+  onPage: (summaries: Record<string, TestSummary>) => void,
+): Promise<Record<string, TestSummary>> {
+  const wanted = new Set(exampleIds);
+  const newest: Record<string, Json> = {};
+  // Each test's newest experiment that is newer than its result and lists no grades.
+  const ungraded: Record<string, Json> = {};
+  // Tests whose such experiment really has no grades yet: being run right now, from anywhere.
+  const running = new Set<string>();
+  const now = Date.now();
+  const statuses = () => Object.fromEntries([...new Set([...Object.keys(newest), ...running])].map((id) => [id, {
+    ...(newest[id] ? summaryOf(newest[id]) : never()),
+    runningElsewhere: running.has(id) && !(id in newest),
+  }]));
+  for (let offset = 0; ; offset += STATUS_PAGE) {
+    const page = await callLangSmith<unknown>('GET /api/v1/sessions', {
+      params: {
+        reference_dataset: datasetId, include_stats: 'true', sort_by: 'start_time', sort_by_desc: 'true',
+        limit: String(STATUS_PAGE), offset: String(offset),
+      },
+    });
+    const experiments = (Array.isArray(page) ? page : []).filter(isRecord);
+    for (const experiment of experiments) {
+      const exampleId = experimentExampleId(experiment);
+      if (!exampleId || exampleId in newest) continue;
+      // Newest first, so the first RESULT seen for a test is its newest. One whose list entry shows no grades isn't
+      // one yet (it would read as "never run" and hide the real result behind it), but it may only be lagging:
+      // its newest such experiment is checked against its runs below.
+      if (isResult(experiment)) newest[exampleId] = experiment;
+      else ungraded[exampleId] ??= experiment;
+    }
+    onPage(statuses());
+    const allFound = [...wanted].every((id) => id in newest);
+    if (allFound || experiments.length < STATUS_PAGE) break;
+  }
+  await gradeFromRuns(datasetId, ungraded);
+  for (const [exampleId, experiment] of Object.entries(ungraded)) {
+    // Newer than any result found for the test, so once its runs show grades it IS the newest result.
+    if (isResult(experiment)) newest[exampleId] = experiment;
+    else if (isRunning(experiment, now)) running.add(exampleId);
+  }
+  // Every test not found on any page has never run.
+  return { ...Object.fromEntries([...wanted].map((id) => [id, never()])), ...statuses() };
+}
+
+// Fills in each experiment's feedback_stats and error_rate from its runs, in place: one request per 50 tests, and
+// only for experiments whose list entry showed no grades (usually none, a few while something is running).
+async function gradeFromRuns(datasetId: string, experiments: Record<string, Json>): Promise<void> {
+  const entries = Object.entries(experiments);
+  for (let i = 0; i < entries.length; i += 50) {
+    const batch = entries.slice(i, i + 50);
+    const page = await callLangSmith<unknown>(`POST /api/v2/datasets/${datasetId}/experiment-runs`, {
+      body: {
+        experiment_ids: batch.map(([, e]) => text(e.id)),
+        example_ids: batch.map(([id]) => id),
+        page_size: 50,
+        selects: ['ID', 'PROJECT_ID', 'STATUS', 'ERROR', 'FEEDBACK_STATS'],
+      },
+    });
+    const items = isRecord(page) && Array.isArray(page.items) ? page.items.filter(isRecord) : [];
+    const runs = items.flatMap((item) => (Array.isArray(item.runs) ? item.runs.filter(isRecord) : []));
+    for (const [, experiment] of batch) {
+      const mine = runs.filter((run) => text(run.project_id) === text(experiment.id));
+      // The lagging list entry can lack run_count too, which read as "0 repetitions" beside real grades.
+      Object.assign(experiment, statsFromRuns(mine), mine.length ? { run_count: mine.length } : {});
+    }
+  }
+}
+
+function never(): TestSummary {
+  return {
+    status: 'none', costPerRun: null, keys: {}, ranAt: '', runs: 0, totalCost: null, latencyP50: null, testHash: '', testVersion: '', agentCommit: '',
+  };
+}
+
+const STATUS_PAGE = 100;
+
+// Why a test's newest result no longer describes it, or null if it still does. Out of date when what the test
+// asks changed after the run (its content hash differs from the one the run recorded: metadata such as tags or a
+// description does not count), or when the agent's code moved on. Web mode knows the current commit and every
+// commit with the same agent code (`sameAgentCommits`: commits that only touched evals or docs don't count); a run
+// records its own. `currentHash` is the test's hash now (contentHash.ts); undefined while it is computed.
+export function staleness(summary: TestSummary | undefined, currentHash: string | undefined, agentCommit?: string,
+  sameAgentCommits?: string[]): string | null {
+  if (!summary || summary.status === 'none') return null;
+  // Runs from before hashes were recorded can't be compared; saying "out of date" for them would be a guess.
+  if (summary.testHash && currentHash && summary.testHash !== currentHash) return 'the test was edited after this run';
+  const ran = summary.agentCommit;
+  const sameAgent = sameAgentCommits?.length
+    ? sameAgentCommits.some((commit) => commit.startsWith(ran.slice(0, 7)))
+    : !agentCommit || ran.startsWith(agentCommit.slice(0, 7));
+  if (agentCommit && ran && !sameAgent) {
+    return `the agent's code changed since this run (${summary.agentCommit.slice(0, 8)} → ${agentCommit.slice(0, 8)})`;
+  }
+  return null;
 }
 
 // --- Import a past run as a test -----------------------------------------------------------------------------
@@ -370,7 +726,10 @@ export async function importTrace(traceId: string, agentTools: string[]) {
     description: `Imported from trace ${traceId} (${started}).`,
     prompt: humanPrompt(root.inputs),
     mockTools,
+    history: [],
+    context: '',
     assertions: [{ key: keyId(), name: '', assertion: '' }],
+    checks: [],
     splits: ['base'],
   };
   return { draft, recordedOn: started, toolCalls: toolRuns.length };
@@ -388,4 +747,27 @@ export function duration(start: string, end: string) {
   if (!Number.isFinite(ms) || ms <= 0) return '';
   const minutes = Math.floor(ms / 60000);
   return minutes ? `${minutes}m ${Math.round((ms % 60000) / 1000)}s` : `${Math.round(ms / 1000)}s`;
+}
+
+// --- Files in a test's Given ------------------------------------------------------------------------------
+
+export type TestFile = { name: string; mime_type: string; sha256: string };
+
+// The files a test lists in inputs.attachments (server/files.py).
+export function testFiles(example: Example): TestFile[] {
+  const rows = Array.isArray(example.inputs.attachments) ? example.inputs.attachments.filter(isRecord) : [];
+  return rows.map((row) => ({ name: text(row.name), mime_type: text(row.mime_type), sha256: text(row.sha256) })).filter((row) => row.name);
+}
+
+export function withFiles(example: Example, files: TestFile[]): Example {
+  const { attachments: _old, ...inputs } = example.inputs;
+  return { ...example, inputs: files.length ? { ...inputs, attachments: files } : inputs };
+}
+
+// Opens one run's trace in LangSmith (a new tab), from the Results panel or a drill-down repetition.
+export async function openTrace(result: Pick<TestResult, 'runId' | 'experimentId' | 'traceId'>) {
+  const response = await callLangSmith<{ url: string }>(`GET /api/v2/runs/${result.runId}/url`, {
+    params: { project_id: result.experimentId, trace_id: result.traceId },
+  });
+  if (response?.url) window.langsmith.openUrl(response.url, { newTab: true });
 }

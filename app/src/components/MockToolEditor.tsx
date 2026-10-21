@@ -1,7 +1,6 @@
 import { useState } from 'react';
 import { Button } from '@langchain/macaw-components/Button';
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from '@langchain/macaw-components/DropdownMenu';
-import { DotsThreeIcon } from '@phosphor-icons/react/dist/csr/DotsThree';
+import { ActionsMenu } from './ActionsMenu';
 import { RemoveButton, TextAreaField, TextField } from './fields';
 import { isRecord, keyId, parseResponse, type Json, type MockCase, type MockTool } from '../lib/data';
 
@@ -20,23 +19,31 @@ function responseSummary(response: string): { fails: boolean; text: string } {
     const first = parsed.rows.find(isRecord);
     return { fails: false, text: `${parsed.rows.length} rows · ${first ? list(Object.keys(first)) : 'no columns'} · ${size}` };
   }
+  // {"sequence": [...]}: a different response per successive call, the last one repeating.
+  if (isRecord(parsed) && Object.keys(parsed).length === 1 && Array.isArray(parsed.sequence)) {
+    const fails = parsed.sequence.filter((step) => isRecord(step) && 'raise' in step).length;
+    return { fails: false, text: `sequence of ${parsed.sequence.length} responses, last repeats${fails ? ` · ${fails} fail` : ''} · ${size}` };
+  }
   if (Array.isArray(parsed)) return { fails: false, text: `${parsed.length} items · ${size}` };
   if (isRecord(parsed)) return { fails: false, text: `fields: ${list(Object.keys(parsed))} · ${size}` };
   const textValue = String(parsed);
   return { fails: false, text: `"${textValue.length > 60 ? `${textValue.slice(0, 60)}…` : textValue}"` };
 }
 
-function WhenChips({ when }: { when: string }) {
+function WhenChips({ when, anyValue }: { when: string; anyValue?: string }) {
   let parsed: Json | null = null;
   try {
     parsed = when.trim() ? (JSON.parse(when) as Json) : null;
   } catch {
     return <span className="font-mono text-xs text-error-primary">invalid: {when}</span>;
   }
-  if (!parsed || !Object.keys(parsed).length) return <span className="text-xs text-tertiary">Any call</span>;
+  if ((!parsed || !Object.keys(parsed).length) && anyValue === undefined) return <span className="text-xs text-tertiary">Any call</span>;
   return (
     <span className="flex flex-wrap gap-space-1">
-      {Object.entries(parsed).map(([arg, value]) => (
+      {anyValue !== undefined ? (
+        <span className="rounded-sm border border-default bg-surface-level-2 px-space-1 font-mono text-xs text-primary">any argument = {anyValue}</span>
+      ) : null}
+      {Object.entries(parsed ?? {}).map(([arg, value]) => (
         <span key={arg} className="rounded-sm border border-default bg-surface-level-2 px-space-1 font-mono text-xs text-primary">
           {arg} = {typeof value === 'string' ? value : JSON.stringify(value)}
         </span>
@@ -98,42 +105,31 @@ function MockToolEditor({ mock, tools, onChange, onRemove }: {
               <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center hover:bg-surface-level-2">
               <button type="button" aria-expanded={isOpen} onClick={() => setOpen(isOpen ? null : row.key)}
                 className="grid w-full grid-cols-[minmax(0,200px)_minmax(0,1fr)] items-center gap-space-3 px-space-3 py-space-2 text-left">
-                <WhenChips when={row.when} />
+                <WhenChips when={row.when} anyValue={row.anyValue} />
                 {preview.fails ? (
                   <span className="truncate text-xs"><span className="mr-space-1 rounded-sm bg-error-subtle px-space-1 font-medium text-error-primary">Fails</span>{preview.text}</span>
                 ) : (
                   <span className="truncate text-xs text-secondary">{preview.text}</span>
                 )}
               </button>
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <button type="button" aria-label="Response actions" className="mr-space-2 inline-flex size-7 items-center justify-center rounded-md text-tertiary hover:bg-surface-level-3 hover:text-primary">
-                    <DotsThreeIcon size={18} weight="bold" />
-                  </button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end">
-                  <DropdownMenuItem onSelect={() => setOpen(isOpen ? null : row.key)}>{isOpen ? 'Close' : 'Edit'}</DropdownMenuItem>
-                  {mock.cases ? (
-                    <>
-                      <DropdownMenuItem onSelect={() => duplicateCase(row.key)}>Duplicate</DropdownMenuItem>
-                      <DropdownMenuSeparator />
-                      <DropdownMenuItem className="text-error-primary" onSelect={() => deleteCase(row.key)}>Delete</DropdownMenuItem>
-                    </>
-                  ) : null}
-                </DropdownMenuContent>
-              </DropdownMenu>
+              <ActionsMenu label="Response actions" compact items={[
+                { label: isOpen ? 'Close' : 'Edit', onSelect: () => setOpen(isOpen ? null : row.key) },
+                ...(mock.cases ? [
+                  { label: 'Duplicate', onSelect: () => duplicateCase(row.key) },
+                  { label: 'Delete', danger: true, onSelect: () => deleteCase(row.key) },
+                ] : []),
+              ]} />
               </div>
               {isOpen ? (
                 <div className="flex flex-col gap-space-2 border-t border-default bg-surface-level-2 p-space-3">
                   {mock.cases ? (
-                    <div className="flex items-end gap-space-2">
-                      <div className="flex-1">
-                        <TextField label="When the call's arguments include (JSON; empty = any)" value={row.when} onChange={(when) => patchRow(row.key, { when })} placeholder='{"order_id": "A1001"}' mono />
-                      </div>
+                    <div className="grid grid-cols-2 items-end gap-space-2">
+                      <TextField label="When the call's arguments include (JSON; empty = any)" value={row.when} onChange={(when) => patchRow(row.key, { when })} placeholder='{"order_id": "A1001"}' mono />
+                      <TextField label="Or when any argument equals (text)" value={row.anyValue ?? ''} onChange={(anyValue) => patchRow(row.key, { anyValue: anyValue || undefined })} placeholder="A1001" mono />
                     </div>
                   ) : null}
                   <TextAreaField label="Returns" value={row.response} onChange={(response) => patchRow(row.key, { response })}
-                    rows={row.response.length > 400 ? 12 : 3} mono placeholder='{"raise": "503 Service Unavailable"}' />
+                    rows={row.response.length > 400 ? 12 : 3} mono placeholder='{"raise": "503 Service Unavailable"} or {"sequence": [first, second, …]}' />
                 </div>
               ) : null}
             </div>
@@ -150,7 +146,7 @@ function MockToolEditor({ mock, tools, onChange, onRemove }: {
           const key = keyId();
           const cases = mock.cases ?? [{ key: keyId(), when: '', response: mock.response }];
           // First match wins and an empty `when` matches anything, so new cases go before any catch-all.
-          const catchAll = cases.findIndex((row) => !row.when.trim());
+          const catchAll = cases.findIndex((row) => !row.when.trim() && row.anyValue === undefined);
           const at = catchAll === -1 ? cases.length : catchAll;
           onChange({ cases: [...cases.slice(0, at), { key, when: '', response: '' }, ...cases.slice(at)], response: '' });
           setOpen(key);

@@ -2,14 +2,23 @@
 
 Each test (dataset example) is Given / When / Then:
   inputs.mock_tools, inputs.recorded_on   Given: every tool response the run may see (see mocks.py)
+  inputs.history                          Given: prior turns [{role, content}] sent before the prompt
+  inputs.context                          Given: opaque JSON the hook uses to set the agent up (its own keys)
+  inputs.attachments                      Given: files handed to the agent, stored as example attachments (files.py)
   inputs.prompt                           When: the message sent to the agent
   outputs.assertions                      Then: [{name, assertion}], one-sentence statements about the run
+  outputs.checks                          Then: [{name, type, ...}], code checks a judge can't grade (checks.py)
+
+The hook returns the replayed history first, then this turn's messages. Grading and code checks look only at
+this turn, so replayed history never counts as the agent's own work.
   metadata.name, metadata.description     what the test is
 
 A test runs `repetitions` times in parallel as one experiment, because an agent that passes once can still be
 flaky. Every run gets two kinds of feedback:
-  all-tools-mocked   0 if the agent called a tool the test doesn't mock (the run touched something unpinned)
   <assertion name>   1 / 0 per assertion, graded together in one LLM call against the transcript
+  <check name>       1 / 0 per code check, graded in code (None for an unknown type, never a silent pass)
+A run that called a tool the test doesn't mock is not graded at all: it errors with IncompleteTest, because
+the test, not the agent, is what needs fixing.
 
     uv run python harness.py                       # every test, 3 repetitions
     uv run python harness.py refund-damaged -r 1   # by name
@@ -17,25 +26,37 @@ flaky. Every run gets two kinds of feedback:
 
 from __future__ import annotations
 
-import argparse
+import inspect
 import json
 import os
+import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 
 from dotenv import load_dotenv
 from langchain.chat_models import init_chat_model
-from langchain_core.messages import AIMessage, BaseMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langsmith import Client, evaluate
 from pydantic import BaseModel
 
 load_dotenv()
 
-import hook  # noqa: E402  (after load_dotenv: the agent reads its model settings at import)
+from agent_hook import load_hook  # noqa: E402
+from checks import run_checks  # noqa: E402
+from content_hash import content_hash  # noqa: E402
+from evidence import build_evidence  # noqa: E402
+from files import AgentRun, Attachment, FileProblem, describe, materialize  # noqa: E402
 from mocks import MockTools  # noqa: E402
+from suite import Repetition  # noqa: E402
+
+hook = load_hook()  # after load_dotenv: the agent reads its model settings at import
 
 DATASET_NAME = os.environ.get("EVAL_DATASET", "eval-editor-demo")
 JUDGE_MODEL = os.environ.get("JUDGE_MODEL", "anthropic:claude-sonnet-5-5")
-EVIDENCE_LIMIT = 60_000
+# Characters of evidence a grader sees (~50k tokens). Generous on purpose: judges read 1M tokens, Luna reads 50k for
+# about half a cent, and every cut risks hiding what an assertion is about. At 60k, a 16-call bulk edit lost the
+# original captions a judge needed to confirm "only hashtags were added".
+EVIDENCE_LIMIT = 200_000
 
 
 def _transcript(messages: list[BaseMessage]) -> list[dict]:
@@ -48,25 +69,92 @@ def _transcript(messages: list[BaseMessage]) -> list[dict]:
     return rows
 
 
-def target(inputs: dict) -> dict:
-    """One run of one test: the agent answers the prompt with every tool call served from the test's mocks."""
+def _model_calls(messages: list[BaseMessage]) -> list[dict]:
+    """Token usage per model call, for code checks like max_prompt_tokens. A judge can't see these numbers."""
+    calls = []
+    for message in messages:
+        if not isinstance(message, AIMessage) or message.usage_metadata is None:
+            continue
+        usage = message.usage_metadata
+        calls.append({"input_tokens": usage.get("input_tokens"), "output_tokens": usage.get("output_tokens"),
+                      "tool_calls": len(message.tool_calls)})
+    return calls
+
+
+def _this_turn(messages: list[BaseMessage], inputs: dict) -> list[BaseMessage]:
+    """The messages from the prompt on. Replayed history must not count as the agent's own work.
+
+    Found by the prompt's own message rather than by counting history: an agent that summarizes a long thread
+    returns fewer messages than it was given, and a count would then cut into this turn.
+    """
+    prompt = inputs["prompt"].strip()
+    for index in range(len(messages) - 1, -1, -1):
+        if isinstance(messages[index], HumanMessage) and messages[index].text.strip() == prompt:
+            return messages[index:]
+    return messages[len(inputs.get("history") or []):]
+
+
+def _run_agent(inputs: dict, mocks: MockTools, files: list[Attachment]) -> list[BaseMessage] | AgentRun:
+    # Pass history, context and files only when the test has them, so hooks written before they existed still work.
+    extra: dict = {key: inputs[key] for key in ("history", "context") if inputs.get(key)}
+    if files:
+        if "attachments" not in inspect.signature(hook.run_agent).parameters:
+            raise IncompleteTest("This test hands the agent files, but the hook's run_agent takes no `attachments`.")
+        extra["attachments"] = files
+    return hook.run_agent(inputs["prompt"], mocks, **extra)
+
+
+def target(inputs: dict, attachments: dict | None = None) -> dict:
+    """One run of one test: the agent answers the prompt with every tool call served from the test's mocks.
+
+    `attachments` is LangSmith's name for the example's stored files ({name: {reader, mime_type, ...}}); it
+    passes them because this function has a parameter by that name (see files.py).
+    """
     mocks = MockTools(inputs.get("mock_tools"), inputs.get("recorded_on"))
-    messages = hook.run_agent(inputs["prompt"], mocks)
-    answer = next((m.text for m in reversed(messages) if isinstance(m, AIMessage) and m.text), "")
-    return {"answer": answer, "tool_calls": mocks.calls, "unmocked_calls": mocks.unmocked,
-            "transcript": _transcript(messages)}
+    try:
+        files = materialize(inputs.get("attachments") or [], attachments)
+    except FileProblem as problem:
+        raise IncompleteTest(str(problem)) from problem
+    result = _run_agent(inputs, mocks, files)
+    messages, made = (result.messages, result.files) if isinstance(result, AgentRun) else (result, [])
+    if mocks.unmocked:
+        # Not a grade: the test is incomplete. After the first unmocked call the agent was answering an error
+        # the test never wrote, so nothing it did afterwards says anything about the agent.
+        names = ", ".join(sorted({call["name"] for call in mocks.unmocked}))
+        raise IncompleteTest(f"Test incomplete: no mock answered {names}. Mock it (or add a matching case).")
+    turn = _this_turn(messages, inputs)
+    answer = next((m.text for m in reversed(turn) if isinstance(m, AIMessage) and m.text), "")
+    outputs = {"answer": answer, "tool_calls": mocks.calls, "model_calls": _model_calls(turn),
+               "transcript": _transcript(turn)}
+    if made:
+        outputs["files"] = describe(made)
+    return outputs
 
 
-def all_tools_mocked(outputs: dict) -> dict:
-    unmocked = outputs.get("unmocked_calls") or []
-    names = sorted({call["name"] for call in unmocked})
-    return {"key": "all-tools-mocked", "score": int(not unmocked),
-            "comment": f"Called without a mock: {', '.join(names)}" if names else "Every tool call was mocked."}
+def _errored(outputs: dict) -> bool:
+    """Whether the run raised (e.g. IncompleteTest), leaving nothing of the agent's to grade.
+
+    LangSmith hands an errored run's evaluators `{"output": None}`, not an empty dict, so this looks for what
+    `target` always returns instead of for emptiness.
+    """
+    return "transcript" not in (outputs or {})
+
+
+def code_checks(outputs: dict, reference_outputs: dict) -> dict:
+    """Grades `outputs.checks` in code; each check becomes its own feedback key (see checks.py)."""
+    checks = reference_outputs.get("checks") or []
+    if _errored(outputs):
+        return {"results": []}
+    return {"results": run_checks(outputs, checks, custom=getattr(hook, "custom_check", None))}
+
+
+class IncompleteTest(Exception):
+    """The agent called a tool the test has no mock for. The test needs fixing, not the agent."""
 
 
 class Grade(BaseModel):
     name: str
-    passed: bool
+    passed: bool | None
     reason: str
 
 
@@ -76,8 +164,9 @@ class Grades(BaseModel):
 
 JUDGE_PROMPT = """You are grading one run of an AI agent against a test's assertions.
 
-Each assertion is a statement that should be true of the run. Judge it only from the evidence: the agent's
-final answer, its messages, and its tool calls with their arguments and results. If the evidence does not show
+Each assertion is a statement that should be true of the run. Judge it only from the evidence: what the agent
+started from (`given`: its context and the end of the prior conversation), its final answer, its messages, and
+its tool calls with their arguments and results. If the evidence does not show
 that the assertion is true, it fails. Return one grade per assertion, using its name, with a one-sentence reason
 that cites the evidence.
 
@@ -90,20 +179,66 @@ that cites the evidence.
 </evidence>"""
 
 
-def assertions(outputs: dict, reference_outputs: dict) -> dict:
+def _judge():
+    # A hook may supply its own judge, e.g. to bill grading to the same test key its agent runs on.
+    judge_model = getattr(hook, "judge_model", None)
+    return judge_model() if judge_model else init_chat_model(JUDGE_MODEL)
+
+
+def _judge_all(tests: list[dict], evidence: dict) -> list[Grade]:
+    """The default grader: one judge call grades every assertion."""
+    # Not sliced: build_evidence already fitted it, value by value (see evidence.py).
+    prompt = JUDGE_PROMPT.format(assertions=json.dumps(tests, indent=2), evidence=json.dumps(evidence, default=str))
+    return _judge().with_structured_output(Grades, method="json_schema").invoke(prompt).grades
+
+
+def assertions(inputs: dict, outputs: dict, reference_outputs: dict) -> dict:
     """Grades every assertion in one call; each becomes its own feedback key."""
     tests = [t for t in reference_outputs.get("assertions") or [] if t.get("name")]
-    if not tests:
+    if not tests or _errored(outputs):
         return {"results": []}
-    evidence = {k: outputs.get(k) for k in ("answer", "tool_calls", "transcript")}
-    prompt = JUDGE_PROMPT.format(assertions=json.dumps(tests, indent=2),
-                                 evidence=json.dumps(evidence, indent=2, default=str)[:EVIDENCE_LIMIT])
-    judge = init_chat_model(JUDGE_MODEL).with_structured_output(Grades, method="json_schema")
-    by_name = {g.name: g for g in judge.invoke(prompt).grades}
+    evidence = build_evidence(inputs, outputs, EVIDENCE_LIMIT)
+    # A hook may grade assertions its own way, e.g. with a cheap yes/no classifier that hands only the cases it
+    # is unsure of to a chat model. It returns one {name, passed, reason} per assertion.
+    grade_assertions = getattr(hook, "grade_assertions", None)
+    grades = _with_retries(lambda: grade_assertions(tests, evidence) if grade_assertions else _judge_all(tests, evidence))
+    by_name = {g.name: g for g in grades}
     return {"results": [
-        {"key": t["name"], "score": int(by_name[t["name"]].passed) if t["name"] in by_name else None,
+        {"key": t["name"], "score": _score(by_name[t["name"]]) if t["name"] in by_name else None,
          "comment": by_name[t["name"]].reason if t["name"] in by_name else "The judge returned no grade."}
         for t in tests]}
+
+
+# A judge reached over the network fails transiently (2026-10-18: Jev and Luna ConnectTimeouts made three passing
+# repetitions of one test read as failed). Retried a couple of times; a run that still cannot be graded is
+# reported "ungraded" by the suite (suite.EVALUATOR_KEYS), never as the agent failing.
+_RETRIES = 3
+_RETRY_WAIT_SECONDS = 2.0
+
+
+def _with_retries(grade: Callable[[], list[Grade]]) -> list[Grade]:
+    for attempt in range(_RETRIES):
+        try:
+            return grade()
+        except Exception as error:  # noqa: BLE001 - re-raised below unless it is a network blip
+            if attempt == _RETRIES - 1 or not _transient(error):
+                raise
+            time.sleep(_RETRY_WAIT_SECONDS * (attempt + 1))
+    raise AssertionError("unreachable")
+
+
+def _transient(error: BaseException) -> bool:
+    # httpx, openai and anthropic each have their own timeout and connection error classes, and this module
+    # imports none of their SDKs, so they are recognised by name; a real bug (KeyError, a 400) is never retried.
+    if isinstance(error, (TimeoutError, ConnectionError)):
+        return True
+    names = {cls.__name__ for cls in type(error).__mro__}
+    return any("Timeout" in name or "Connect" in name for name in names)
+
+
+def _score(grade: Grade) -> int | None:
+    # None means the grader couldn't decide (e.g. it was unreachable); it must not read as a pass or a fail.
+    return None if grade.passed is None else int(grade.passed)
 
 
 def test_name(example) -> str:
@@ -112,11 +247,34 @@ def test_name(example) -> str:
 
 def run_test(example, repetitions: int = 3, client: Client | None = None) -> str:
     """Runs one test `repetitions` times as one experiment and returns the experiment's name."""
+    return _evaluate(example, repetitions, client).experiment_name
+
+
+def run_test_repetitions(example, repetitions: int = 3, client: Client | None = None) -> tuple[str, list[Repetition]]:
+    """Runs one test and returns its experiment's name and each repetition's error and scores (for cli.py)."""
+    results = _evaluate(example, repetitions, client)
+    reps = []
+    for row in results:
+        graded = (row.get("evaluation_results") or {}).get("results") or []
+        error = row["run"].error
+        reps.append(Repetition(
+            error=error.split("\n\nTraceback")[0] if error else None,
+            scores={r.key: r.score for r in graded},
+            comments={r.key: r.comment or "" for r in graded},
+        ))
+    return results.experiment_name, reps
+
+
+def _evaluate(example, repetitions: int, client: Client | None):
     name = test_name(example)
-    results = evaluate(target, data=[example], evaluators=[all_tools_mocked, assertions], client=client,
-                       num_repetitions=repetitions, max_concurrency=repetitions, experiment_prefix=name,
-                       metadata={"test": name, "example_id": str(example.id), "repetitions": repetitions})
-    return results.experiment_name
+    if (example.inputs or {}).get("attachments"):
+        # Listing examples leaves out their files; reading one example by id downloads them.
+        example = (client or Client()).read_example(example.id)
+    return evaluate(target, data=[example], evaluators=[assertions, code_checks], client=client,
+                    num_repetitions=repetitions, max_concurrency=repetitions, experiment_prefix=name,
+                    # test_hash: what the test asked when it ran, so the editor can tell when it has changed since.
+                    metadata={"test": name, "example_id": str(example.id), "repetitions": repetitions,
+                              "test_hash": content_hash(example.inputs or {}, example.outputs or {})})
 
 
 def run_tests(example_ids: list[str] | None = None, names: list[str] | None = None, repetitions: int = 3) -> list[str]:
@@ -129,9 +287,6 @@ def run_tests(example_ids: list[str] | None = None, names: list[str] | None = No
 
 
 if __name__ == "__main__":
-    ap = argparse.ArgumentParser()
-    ap.add_argument("names", nargs="*", help="test names (default: all)")
-    ap.add_argument("-r", "--repetitions", type=int, default=3)
-    args = ap.parse_args()
-    for experiment in run_tests(names=args.names or None, repetitions=args.repetitions):
-        print("experiment:", experiment)
+    # Kept for old habits; cli.py is the full runner (-k, --tag, --lf, markers, exit codes, JUnit).
+    import cli
+    raise SystemExit(cli.main())

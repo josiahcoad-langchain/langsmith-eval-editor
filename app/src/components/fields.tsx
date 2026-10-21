@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from 'react';
+import { useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { Button } from '@langchain/macaw-components/Button';
 import { Card } from '@langchain/macaw-components/Card';
 import { Text } from '@langchain/macaw-components/Text';
@@ -23,17 +23,31 @@ export function TextField({ label, value, onChange, placeholder, mono = false }:
   return label ? <label className={labelClass}>{label}{input}</label> : input;
 }
 
-export function TextAreaField({ label, value, onChange, rows = 2, mono = false, placeholder }: {
+export function TextAreaField({ label, value, onChange, rows = 2, mono = false, placeholder, maxRows }: {
   label?: string;
   value: string;
   onChange: (value: string) => void;
   rows?: number;
   mono?: boolean;
   placeholder?: string;
+  // Grow with the text up to this many lines, then scroll. Without it the box keeps `rows`.
+  maxRows?: number;
 }) {
+  const ref = useRef<HTMLTextAreaElement>(null);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el || !maxRows) return;
+    const style = getComputedStyle(el);
+    const line = parseFloat(style.lineHeight) || 20;
+    const chrome = parseFloat(style.paddingTop) + parseFloat(style.paddingBottom) + parseFloat(style.borderTopWidth) + parseFloat(style.borderBottomWidth);
+    el.style.height = 'auto';
+    const cap = line * maxRows + chrome;
+    el.style.height = `${Math.min(el.scrollHeight + parseFloat(style.borderTopWidth) + parseFloat(style.borderBottomWidth), cap)}px`;
+    el.style.overflowY = el.scrollHeight + chrome > cap ? 'auto' : 'hidden';
+  }, [value, maxRows]);
   const area = (
-    <textarea className={`${fieldClass} ${mono ? 'font-mono text-xs leading-5' : ''}`} value={value} rows={rows} placeholder={placeholder}
-      spellCheck={!mono} aria-label={label ?? placeholder} onChange={(event) => onChange(event.currentTarget.value)} />
+    <textarea ref={ref} className={`${fieldClass} ${mono ? 'font-mono text-xs leading-5' : ''} ${maxRows ? 'resize-none' : ''}`} value={value} rows={rows}
+      placeholder={placeholder} spellCheck={!mono} aria-label={label ?? placeholder} onChange={(event) => onChange(event.currentTarget.value)} />
   );
   return label ? <label className={labelClass}>{label}{area}</label> : area;
 }

@@ -2,16 +2,26 @@
 
 `run_agent` gets one test's prompt and its mocks, runs the agent once with every tool call answered by the
 mocks, and returns the conversation as LangChain messages. The harness does the rest: repetitions, grading
-assertions, failing the run if the agent called a tool the test doesn't mock, and logging an experiment.
+assertions and code checks, failing the run if the agent called a tool the test doesn't mock, and logging an
+experiment.
+
+`history` (prior turns, [{role, content}]) and `context` (the test's own JSON for setting the agent up) are
+passed only when the test sets them. Return the history messages first, then this turn's, so the harness can
+grade only what the agent did now. This demo agent has no use for `context`.
 
 `TOOL_NAMES` feeds the editor's "Add mock" dropdown and decides which tool runs Import turns into mocks.
 
 For a LangChain/LangGraph agent, pass `mocks.middleware()` into `create_agent(..., middleware=[...])`. For any
 other agent, call `mocks.call(name, args, tool_call_id)` (or `mocks.respond(name, args)`) wherever the agent
 executes a tool, and return the transcript as messages (AIMessage with tool_calls, ToolMessage, ...).
+
+To keep a hook in another repo, set EVAL_HOOK to its module path (see agent_hook.py). A hook may also define
+`custom_check(outputs, check) -> (passed, reason)` to grade checks of type `custom`.
 """
 
 from __future__ import annotations
+
+from typing import Any
 
 from langchain_core.messages import BaseMessage
 
@@ -21,7 +31,9 @@ from mocks import MockTools
 TOOL_NAMES = [t.name for t in TOOLS]
 
 
-def run_agent(prompt: str, mocks: MockTools) -> list[BaseMessage]:
+def run_agent(prompt: str, mocks: MockTools, history: list[dict] | None = None,
+              context: dict[str, Any] | None = None) -> list[BaseMessage]:
     agent = build_agent(middleware=[mocks.middleware()])
-    result = agent.invoke({"messages": [{"role": "user", "content": prompt}]})
+    messages = [*(history or []), {"role": "user", "content": prompt}]
+    result = agent.invoke({"messages": messages})
     return result["messages"]

@@ -7,7 +7,7 @@ Standalone mode (the editor runs in your browser, served from here):
   /api/langsmith/<path>   the LangSmith API, called with this server's LANGSMITH_API_KEY. The editor's code is
                           written against LangSmith's custom-app bridge (window.langsmith.call); in standalone
                           mode that bridge is a shim that forwards here, so one UI works in both modes.
-  /api/runs               POST {example_ids, repetitions} runs tests now; GET lists runs in flight.
+  /api/runs               POST {example_ids, repetitions} runs tests (4 at a time, the rest queued); GET lists runs.
   /api/config             workspace URL, for links into LangSmith.
 
 Custom-app mode (the editor runs inside LangSmith and can't reach this server):
@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 import os
+import subprocess
 import threading
 import uuid
 from datetime import datetime, timezone
@@ -36,9 +37,12 @@ from pydantic import BaseModel
 
 load_dotenv()
 
+import attach  # noqa: E402
 import harness  # noqa: E402
+import regrade  # noqa: E402
 import run_queue  # noqa: E402
 import seed  # noqa: E402
+from suite import DEFAULT_PARALLEL_TESTS  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-7s %(name)s: %(message)s")
 log = logging.getLogger("server")
@@ -64,7 +68,32 @@ def config() -> dict:
     # https://smith.langchain.com/o/<workspace>/datasets/<id> -> the workspace's base URL and ID
     web, _, rest = _dataset_url.partition("/o/")
     workspace_id = rest.split("/")[0]
-    return {"host": web, "workspaceId": workspace_id, "dataset": harness.DATASET_NAME}
+    return {"host": web, "workspaceId": workspace_id, "dataset": harness.DATASET_NAME, "agentCommit": _git("rev-parse", "HEAD"),
+            "sameAgentCommits": _same_agent_commits()}
+
+
+# The agent's own code, as git pathspecs relative to the checkout the server runs from (space-separated). A commit
+# that touches none of them (an eval, a doc) leaves the agent as it was, so results run on it stay current.
+AGENT_PATHS = (os.environ.get("EVAL_AGENT_PATHS") or ".").split()
+SAME_AGENT_LIMIT = 500
+
+
+def _same_agent_commits() -> list[str]:
+    """Every commit whose agent code is the same as HEAD's: HEAD back to the last commit that changed AGENT_PATHS.
+    Experiments record the commit they ran on, so the UI calls a result out of date only when that commit isn't
+    one of these. Empty when the server isn't in a git checkout, and the UI then can't say."""
+    last_change = _git("log", "-1", "--format=%H", "--", *AGENT_PATHS)
+    if not last_change:
+        return []
+    since = _git("rev-list", f"--max-count={SAME_AGENT_LIMIT}", f"{last_change}..HEAD").split()
+    return [*since, last_change]
+
+
+def _git(*args: str) -> str:
+    try:
+        return subprocess.run(["git", *args], capture_output=True, text=True, check=True).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return ""
 
 
 # --- Runs (standalone) --------------------------------------------------------------------------------
@@ -76,16 +105,21 @@ class RunRequest(BaseModel):
 
 _runs: dict[str, dict] = {}
 
+# How many tests run at once; the rest wait as "queued". DEFAULT_PARALLEL_TESTS (suite.py) says why it isn't "all".
+MAX_PARALLEL_TESTS = int(os.environ.get("EVAL_PARALLEL") or DEFAULT_PARALLEL_TESTS)
+_slots = threading.Semaphore(MAX_PARALLEL_TESTS)
+
 
 def _run(run_id: str) -> None:
     job = _runs[run_id]
-    job["state"] = "running"
-    try:
-        harness.run_tests(example_ids=[job["example_id"]], repetitions=job["repetitions"])
-        job["state"] = "done"
-    except Exception as error:  # noqa: BLE001 - surface it in the UI instead of killing the server
-        log.exception("run %s failed", run_id)
-        job.update(state="error", error=str(error))
+    with _slots:
+        job["state"] = "running"
+        try:
+            harness.run_tests(example_ids=[job["example_id"]], repetitions=job["repetitions"])
+            job["state"] = "done"
+        except Exception as error:  # noqa: BLE001 - surface it in the UI instead of killing the server
+            log.exception("run %s failed", run_id)
+            job.update(state="error", error=str(error))
 
 
 @app.post("/api/runs")
@@ -100,9 +134,53 @@ def start_runs(body: RunRequest) -> list[dict]:
     return started
 
 
+class RegradeRequest(BaseModel):
+    example_id: str
+    name: str
+    times: int = 3
+
+
+@app.post("/api/regrade")
+def regrade_assertion(body: RegradeRequest) -> dict:
+    """Re-grade one assertion over the test's newest saved transcripts and say why it varied (regrade.py)."""
+    try:
+        return regrade.regrade(client, body.example_id, body.name, times=max(1, min(body.times, 5)))
+    except ValueError as error:
+        raise HTTPException(400, str(error)) from error
+
+
 @app.get("/api/runs")
 def list_runs() -> list[dict]:
     return sorted(_runs.values(), key=lambda job: job["requested_at"], reverse=True)
+
+
+# --- Files in a test's Given (attach.py) ----------------------------------------------------------------
+# The file is the raw request body and its type the Content-Type header, so no multipart parser is needed: the
+# server often runs from the agent's own environment, which shouldn't need an extra package for this.
+
+@app.post("/api/examples/{example_id}/files")
+async def add_file(example_id: str, name: str, request: Request) -> list[dict]:
+    mime_type = (request.headers.get("content-type") or "application/octet-stream").split(";")[0]
+    try:
+        return attach.attach_file(client, client.read_example(example_id), name, mime_type, await request.body())
+    except ValueError as error:
+        raise HTTPException(400, str(error)) from error
+
+
+@app.delete("/api/examples/{example_id}/files/{name}")
+def delete_file(example_id: str, name: str) -> list[dict]:
+    return attach.remove_file(client, client.read_example(example_id), name)
+
+
+@app.get("/api/examples/{example_id}/files/{name}")
+def get_file(example_id: str, name: str) -> Response:
+    """The file's bytes, for the editor's preview (reading the example downloads its files)."""
+    stored = client.read_example(example_id).attachments or {}
+    if name not in stored:
+        raise HTTPException(404, f"no file named {name} on this test")
+    reader = stored[name]["reader"]
+    reader.seek(0)
+    return Response(reader.read(), media_type=stored[name].get("mime_type") or "application/octet-stream")
 
 
 # --- Webhook (custom app) ------------------------------------------------------------------------------

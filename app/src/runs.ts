@@ -1,3 +1,4 @@
+import type { TestFile } from './lib/data';
 // How Run test reaches the eval server, in each mode:
 //   web         POST /api/runs on the server that serves this page; it runs the tests right away.
 //   custom app  The app can only talk to LangSmith, so it commits the request to a Context Hub prompt repo
@@ -23,21 +24,46 @@ async function errorFrom(response: Response) {
 }
 
 export async function requestRun(request: RunRequest) {
+  await requestRuns([request]);
+}
+
+// Several tests in one go (Run all, Run failing). The web server runs a few at a time and queues the rest.
+export async function requestRuns(requests: RunRequest[]) {
+  if (!requests.length) return;
   if (web) {
     const response = await fetch('/api/runs', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ example_ids: [request.exampleId], repetitions: request.repetitions }),
+      body: JSON.stringify({ example_ids: requests.map((r) => r.exampleId), repetitions: requests[0].repetitions }),
     });
     if (!response.ok) throw await errorFrom(response);
     return;
   }
-  await commitRequest({
-    test: request.test,
-    example_id: request.exampleId,
-    repetitions: request.repetitions,
-    requested_at: new Date().toISOString(),
-  });
+  // One commit per test: that is the custom-app queue's unit, and the server de-duplicates by test.
+  for (const request of requests) {
+    await commitRequest({
+      test: request.test,
+      example_id: request.exampleId,
+      repetitions: request.repetitions,
+      requested_at: new Date().toISOString(),
+    });
+  }
+}
+
+// Tests with a run queued or in progress right now, by example id. Web mode only: the custom-app queue lives in
+// a prompt repo the server drains on its own schedule, so the app cannot tell queued from finished.
+export async function fetchActiveRuns(): Promise<Record<string, 'queued' | 'running'>> {
+  if (!web) return {};
+  const response = await fetch('/api/runs');
+  if (!response.ok) return {};
+  const active: Record<string, 'queued' | 'running'> = {};
+  for (const job of (await response.json()) as Json[]) {
+    const state = job.state;
+    const id = text(job.example_id);
+    if (state === 'running') active[id] = 'running';
+    else if (state === 'queued' && active[id] !== 'running') active[id] = 'queued';
+  }
+  return active;
 }
 
 // Runs of this test that haven't produced results yet.
@@ -108,4 +134,48 @@ async function fetchRequests(): Promise<Json[]> {
     const kwargs = isRecord(commit.manifest) && isRecord(commit.manifest.kwargs) ? commit.manifest.kwargs : {};
     return parseRequest(text(kwargs.template));
   });
+}
+
+
+// --- Re-grade (web mode): grade one assertion again over the test's saved transcripts ---------------------------
+
+export type Regrade = {
+  experiment: string; judges: string[]; times: number;
+  repetitions: { number: number; original: boolean | null; regrades: Record<string, (boolean | null)[]>; reasons: Record<string, string>; answer: string; tool_calls: string[] }[];
+  cause: 'judge_unreliable' | 'grade_overturned' | 'assertion_ambiguous' | 'agent_varied' | 'consistent_fail' | 'consistent_pass';
+  advice: string;
+  failing_repetitions: number[]; disputed_repetitions: number[]; unreliable_judges: string[]; overturned_repetitions: number[];
+};
+
+export async function requestRegrade(exampleId: string, name: string, times = 3): Promise<Regrade> {
+  const response = await fetch('/api/regrade', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ example_id: exampleId, name, times }),
+  });
+  if (!response.ok) throw await errorFrom(response);
+  return (await response.json()) as Regrade;
+}
+
+// --- Files in a test's Given (server/attach.py). Web mode only: uploading needs the server. ---
+
+export async function uploadFile(exampleId: string, file: File): Promise<TestFile[]> {
+  const response = await fetch(`/api/examples/${exampleId}/files?name=${encodeURIComponent(file.name)}`, {
+    method: 'POST',
+    headers: { 'content-type': file.type || 'application/octet-stream' },
+    body: file,
+  });
+  if (!response.ok) throw await errorFrom(response);
+  return (await response.json()) as TestFile[];
+}
+
+export async function removeFile(exampleId: string, name: string): Promise<TestFile[]> {
+  const response = await fetch(`/api/examples/${exampleId}/files/${encodeURIComponent(name)}`, { method: 'DELETE' });
+  if (!response.ok) throw await errorFrom(response);
+  return (await response.json()) as TestFile[];
+}
+
+export function fileUrl(exampleId: string, file: TestFile) {
+  // The hash in the URL makes a replaced file load fresh instead of from the browser cache.
+  return `/api/examples/${exampleId}/files/${encodeURIComponent(file.name)}?v=${file.sha256.slice(0, 12)}`;
 }

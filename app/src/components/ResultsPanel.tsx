@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Spinner } from '@langchain/macaw-components/Spinner';
 import { Text } from '@langchain/macaw-components/Text';
-import { callLangSmith, duration, errorMessage, fetchResults, shortDate, type Example, type TestResult } from '../lib/data';
+import { duration, errorMessage, fetchResults, isRecord, openTrace, shortDate, text, type Example, type TestResult } from '../lib/data';
 import { fetchPending, type PendingRun } from '../runs';
 
 type ExperimentGroup = { experimentId: string; experimentName: string; start: string; runs: TestResult[] };
@@ -45,7 +45,7 @@ export function ResultsPanel({ datasetId, example, workspaceId, onClose }: { dat
     const refresh = async () => {
       setChecking(true);
       try {
-        const next = await fetchResults(datasetId, example.id);
+        const next = await fetchResults(datasetId, example.id, text(example.metadata.name));
         const pending = await fetchPending(example.id, next[0]?.start ?? '');
         if (!alive) return;
         setResults(next);
@@ -68,17 +68,15 @@ export function ResultsPanel({ datasetId, example, workspaceId, onClose }: { dat
     };
   }, [datasetId, example.id]);
 
-  const openTrace = async (result: TestResult) => {
+  const showTrace = async (result: TestResult) => {
     try {
-      const { url } = (await callLangSmith<{ url: string }>(`GET /api/v2/runs/${result.runId}/url`, {
-        params: { project_id: result.experimentId, trace_id: result.traceId },
-      })) ?? { url: '' };
-      if (url) window.langsmith.openUrl(url, { newTab: true });
+      await openTrace(result);
     } catch (err) {
       setError(errorMessage(err));
     }
   };
 
+  const checkNames = new Set(Array.isArray(example.outputs.checks) ? example.outputs.checks.map((row) => (isRecord(row) ? text(row.name) : '')) : []);
   return (
     <aside className="flex min-h-0 flex-col gap-space-3 overflow-y-auto border-l border-default pl-space-4">
       <div className="flex items-start justify-between gap-space-2">
@@ -110,8 +108,10 @@ export function ResultsPanel({ datasetId, example, workspaceId, onClose }: { dat
       {!results && !error ? <div className="flex items-center gap-space-2"><Spinner size="sm" /><Text variant="xs" color="tertiary">Loading results…</Text></div> : null}
       {results && results.length === 0 && !queued.length ? <Text variant="xs" color="tertiary">No runs of this test yet. Click Run test.</Text> : null}
       {results ? groupByExperiment(results).map((group) => {
-        // The built-in all-tools-mocked check first, then the test's own assertions.
-        const keys = [...new Set(group.runs.flatMap((r) => r.assertions.map((a) => a.key)))].sort((a, b) => Number(b === 'all-tools-mocked') - Number(a === 'all-tools-mocked'));
+        // The test's own assertions, then its code checks.
+        // Code checks (outputs.checks) log feedback exactly like assertions, so they are told apart by name and listed last.
+        const rank = (key: string) => (checkNames.has(key) ? 2 : 1);
+        const keys = [...new Set(group.runs.flatMap((r) => r.assertions.map((a) => a.key)))].sort((a, b) => rank(a) - rank(b));
         const running = group.runs.filter((r) => !r.end || r.status.toLowerCase() === 'pending').length;
         const rows = keys.map((key) => {
           const scores = group.runs.map((r) => r.assertions.find((a) => a.key === key)?.score ?? null).filter((v): v is number => v !== null);
@@ -146,6 +146,7 @@ export function ResultsPanel({ datasetId, example, workspaceId, onClose }: { dat
                     <li key={row.key} className="flex items-baseline gap-space-2 text-xs" title={row.comment || undefined}>
                       <span className={`w-9 shrink-0 text-right font-medium ${tone}`}>{row.scored ? (reps > 1 ? `${row.passed}/${row.scored}` : row.passed ? '✓' : '✗') : '–'}</span>
                       <span className="font-mono text-primary">{row.key}</span>
+                      {checkNames.has(row.key) ? <span className="rounded-sm border border-default px-space-1 text-tertiary">code check</span> : null}
                       {row.scored && row.passed > 0 && row.passed < row.scored ? <span className="text-warning-primary">flaky</span> : null}
                     </li>
                   );
@@ -169,9 +170,15 @@ export function ResultsPanel({ datasetId, example, workspaceId, onClose }: { dat
                           {openAnswer === result.runId ? 'Hide answer' : 'Answer'}
                         </button>
                       ) : null}
-                      <button type="button" className="text-secondary underline hover:text-primary" onClick={() => void openTrace(result)}>Trace</button>
+                      <button type="button" className="text-secondary underline hover:text-primary" onClick={() => void showTrace(result)}>Trace</button>
                     </div>
                     {result.error ? <Text variant="xs" color="error">{result.error}</Text> : null}
+                    {result.traceback ? (
+                      <details className="text-xs text-tertiary">
+                        <summary className="cursor-pointer">Show traceback</summary>
+                        <pre className="mt-space-1 max-h-60 overflow-auto whitespace-pre-wrap font-mono">{result.traceback}</pre>
+                      </details>
+                    ) : null}
                     {openAnswer === result.runId ? (
                       <p className="max-h-64 overflow-y-auto whitespace-pre-wrap rounded-md bg-surface-level-2 p-space-2 text-xs text-primary">{result.answer}</p>
                     ) : null}

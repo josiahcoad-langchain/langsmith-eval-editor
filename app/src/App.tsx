@@ -1,27 +1,54 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Button } from '@langchain/macaw-components/Button';
 import { Card } from '@langchain/macaw-components/Card';
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from '@langchain/macaw-components/DropdownMenu';
 import { Spinner } from '@langchain/macaw-components/Spinner';
 import { Text } from '@langchain/macaw-components/Text';
-import { DotsThreeIcon } from '@phosphor-icons/react/dist/csr/DotsThree';
-import { DATASET_NAME } from './config';
 import { fieldClass, RemoveButton, Section, Subsection, TextAreaField, TextField } from './components/fields';
+import { ActionsMenu } from './components/ActionsMenu';
+import { contentHash } from './lib/contentHash';
+import { AssertionDrilldown } from './components/AssertionDrilldown';
+import { LastRun } from './components/LastRun';
+import { ResultChip } from './components/ResultChip';
+import { CheckEditor } from './components/CheckEditor';
+import { HistoryEditor } from './components/HistoryEditor';
+import { FilesEditor } from './components/FilesEditor';
 import { MockToolEditor } from './components/MockToolEditor';
 import { ResultsPanel } from './components/ResultsPanel';
 import {
-  countToolCalls, deleteExample, emptyExample, errorMessage, fetchAllExamples, fetchDataset, fetchPastRuns, importTrace,
-  isDirty, keyId, saveExampleTo, shortDate, text, toDraft, toPayload, traceIdFrom,
-  type Dataset, type Draft, type Example, type PastRun,
+  contextProblem, countToolCalls, deleteExample, emptyCheck, emptyExample, errorMessage, fetchAllExamples, fetchDataset, fetchPastRuns, fetchResults, fetchStatuses, importTrace, staleness,
+  isDirty, keyId, saveExampleTo, shortDate, testFiles, text, toDraft, toPayload, traceIdFrom, withFiles,
+  type Dataset, type Draft, type Example, type PastRun, type TestStatus, type TestSummary,
 } from './lib/data';
-import { requestRun } from './runs';
+import { fetchActiveRuns, isWeb, requestRun, requestRuns } from './runs';
 
 const AUTOSAVE_MS = 800;
 const REPETITION_CHOICES = [1, 3, 5];
 
 type Notice = { kind: 'error' | 'success'; text: string } | null;
 
-function RailButton({ active, title, subtitle, badge, onClick }: { active: boolean; title: string; subtitle: string; badge?: string; onClick: () => void }) {
+// The newest run's verdict, as a dot before the test's name, like an IDE's test explorer.
+type ListStatus = TestStatus | 'queued' | 'running';
+
+const STATUS_DOT: Record<ListStatus, { glyph: string; color: string; label: string }> = {
+  running: { glyph: '◐', color: 'text-secondary animate-spin', label: 'Running now' },
+  queued: { glyph: '◌', color: 'text-tertiary', label: 'Queued: waits for a free slot (8 tests run at a time; EVAL_PARALLEL changes it)' },
+  pass: { glyph: '●', color: 'text-success-primary', label: 'Newest run: every assertion and check passed on every repetition' },
+  fail: { glyph: '●', color: 'text-error-primary', label: 'Newest run: something failed on every repetition' },
+  flaky: { glyph: '●', color: 'text-warning-primary', label: 'Newest run: passed on some repetitions and failed on others' },
+  error: { glyph: '!', color: 'text-error-primary', label: 'Newest run errored, e.g. the test is incomplete: no grades' },
+  none: { glyph: '○', color: 'text-tertiary', label: 'Never run' },
+};
+
+// An out-of-date result keeps its colour but fades, so "was green, has since changed" reads differently from "green".
+function StatusDot({ status, stale = false }: { status: ListStatus; stale?: boolean }) {
+  const dot = STATUS_DOT[status];
+  const label = stale ? `Out of date (changed since this run). ${dot.label}` : dot.label;
+  return <span className={`w-3 shrink-0 text-center font-bold ${dot.color} ${stale ? 'opacity-40' : ''}`} title={label} aria-label={label}>{dot.glyph}</span>;
+}
+
+function RailButton({ active, title, subtitle, badge, status, stale = false, onClick }: {
+  active: boolean; title: string; subtitle: string; badge?: string; status?: ListStatus; stale?: boolean; onClick: () => void;
+}) {
   return (
     <button
       type="button"
@@ -31,7 +58,10 @@ function RailButton({ active, title, subtitle, badge, onClick }: { active: boole
       onClick={onClick}
     >
       <span className="flex items-center justify-between gap-space-2">
-        <span className="truncate font-mono font-medium">{title}</span>
+        <span className="flex min-w-0 items-center gap-space-1">
+          {status ? <StatusDot status={status} stale={stale} /> : null}
+          <span className="truncate font-mono font-medium">{title}</span>
+        </span>
         {badge ? <span className="shrink-0 text-xs text-tertiary">{badge}</span> : null}
       </span>
       <span className="line-clamp-2 text-xs text-tertiary">{subtitle}</span>
@@ -42,6 +72,18 @@ function RailButton({ active, title, subtitle, badge, onClick }: { active: boole
 export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) {
   const [dataset, setDataset] = useState<Dataset | null>(null);
   const [examples, setExamples] = useState<Example[]>([]);
+  const [summaries, setSummaries] = useState<Record<string, TestSummary>>({});
+  // Each test's content hash as it is now (contentHash.ts), compared with the one its newest run recorded.
+  const [hashes, setHashes] = useState<Record<string, string>>({});
+  // Runs queued or in progress on the server, by example id (web mode), and a counter that re-reads the dots.
+  const [activeRuns, setActiveRuns] = useState<Record<string, 'queued' | 'running'>>({});
+  const [statusTick, setStatusTick] = useState(0);
+  const [confirmBatch, setConfirmBatch] = useState<'all' | 'failing' | null>(null);
+  const [batchNotice, setBatchNotice] = useState<Notice>(null);
+  // Why the selected test's newest run errored, for the header. Read only for an errored test: one small request.
+  const [lastError, setLastError] = useState('');
+  // The assertion or check whose grades are open beside what the agent did (AssertionDrilldown).
+  const [drill, setDrill] = useState<{ kind: 'assertion' | 'check'; name: string } | null>(null);
   const [drafts, setDrafts] = useState<Record<string, Draft>>({});
   const [selectedId, setSelectedId] = useState<string | undefined>();
   const [loading, setLoading] = useState(true);
@@ -50,6 +92,59 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
   const [notice, setNotice] = useState<Notice>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const savingIds = useRef(new Set<string>());
+
+  // Test-list dots. Refreshed on a timer so a run started from the Results panel (or the CLI) shows up. Until the
+  // first answer arrives a test has no dot at all: showing "never run" while loading would be a false statement.
+  const exampleIds = useMemo(() => examples.filter((e) => !e.isNew).map((e) => e.id).sort().join(','), [examples]);
+  useEffect(() => {
+    if (!dataset || !exampleIds) return;
+    let cancelled = false;
+    const show = (next: Record<string, TestSummary>) => { if (!cancelled) setSummaries(next); };
+    const refresh = () => fetchStatuses(dataset.id, exampleIds.split(','), show).then(show).catch(() => {});
+    void refresh();
+    const timer = window.setInterval(() => void refresh(), 30000);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [dataset, exampleIds, statusTick]);
+
+  useEffect(() => {
+    let cancelled = false;
+    Promise.all(examples.filter((e) => !e.isNew).map(async (e) => [e.id, await contentHash(e.inputs, e.outputs)] as const))
+      .then((pairs) => { if (!cancelled) setHashes(Object.fromEntries(pairs)); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [examples]);
+
+  useEffect(() => setDrill(null), [selectedId]);
+
+  const selectedStatus = selectedId ? summaries[selectedId]?.status : undefined;
+  const selectedName = selectedId ? text(examples.find((e) => e.id === selectedId)?.metadata.name) : '';
+  useEffect(() => {
+    setLastError('');
+    if (!dataset || !selectedId || selectedStatus !== 'error') return;
+    let cancelled = false;
+    fetchResults(dataset.id, selectedId, selectedName)
+      .then((results) => { if (!cancelled) setLastError(results.find((r) => r.error)?.error ?? ''); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [dataset, selectedId, selectedStatus, selectedName]);
+
+  // Which tests are queued or running. Polled fast while anything is in flight; when a test finishes, the dots
+  // are re-read so its new result shows without waiting for the 30s refresh.
+  useEffect(() => {
+    if (!isWeb()) return;
+    let cancelled = false;
+    let previous: Record<string, 'queued' | 'running'> = {};
+    const poll = async () => {
+      const next = await fetchActiveRuns().catch(() => previous);
+      if (cancelled) return;
+      if (Object.keys(previous).some((id) => !(id in next))) setStatusTick((tick) => tick + 1);
+      previous = next;
+      setActiveRuns(next);
+    };
+    void poll();
+    const timer = window.setInterval(() => void poll(), 3000);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, []);
   const [importing, setImporting] = useState<'closed' | 'open' | 'busy'>('closed');
   const [importRef, setImportRef] = useState('');
   const [importStatus, setImportStatus] = useState<Notice>(null);
@@ -108,12 +203,12 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
     setDrafts((current) => ({ ...current, [selectedId]: { ...current[selectedId], ...patch } }));
   };
 
-  function patchRow<K extends 'mockTools' | 'assertions'>(field: K, key: string, patch: Partial<Draft[K][number]>) {
+  function patchRow<K extends 'mockTools' | 'assertions' | 'checks'>(field: K, key: string, patch: Partial<Draft[K][number]>) {
     if (!draft) return;
     patchDraft({ [field]: (draft[field] as { key: string }[]).map((row) => (row.key === key ? { ...row, ...patch } : row)) } as Partial<Draft>);
   }
 
-  function removeRow(field: 'mockTools' | 'assertions', key: string) {
+  function removeRow(field: 'mockTools' | 'assertions' | 'checks', key: string) {
     if (!draft) return;
     patchDraft({ [field]: (draft[field] as { key: string }[]).filter((row) => row.key !== key) } as Partial<Draft>);
   }
@@ -166,6 +261,8 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
           name: `${from.name}-copy`,
           mockTools: from.mockTools.map((row) => ({ ...row, key: keyId(), cases: row.cases?.map((c) => ({ ...c, key: keyId() })) ?? null })),
           assertions: from.assertions.map((row) => ({ ...row, key: keyId() })),
+          history: from.history.map((row) => ({ ...row, key: keyId() })),
+          checks: from.checks.map((row) => ({ ...row, key: keyId() })),
         }
       : toDraft(example);
     setExamples((current) => [...current, example]);
@@ -229,6 +326,32 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
     }
   };
 
+  const savedExamples = examples.filter((e) => !e.isNew);
+  const selectedStale = selected && !selected.isNew
+    ? (dirty ? 'the test has unsaved edits' : staleness(summaries[selected.id], hashes[selected.id], metadata?.agentCommit, metadata?.sameAgentCommits))
+    : null;
+  const failingExamples = savedExamples.filter((e) => ['fail', 'flaky', 'error'].includes(summaries[e.id]?.status ?? ''));
+  const batchFor = (which: 'all' | 'failing') => (which === 'all' ? savedExamples : failingExamples);
+
+  // Predicted agent cost: each test's cost per repetition on its newest run, times the repetitions chosen.
+  // Tests with no priced run yet are counted separately rather than guessed.
+  const estimate = (batch: Example[]) => {
+    const priced = batch.map((e) => summaries[e.id]?.costPerRun).filter((c): c is number => c !== null && c !== undefined);
+    return { dollars: priced.reduce((sum, c) => sum + c, 0) * repetitions, unpriced: batch.length - priced.length };
+  };
+  const formatDollars = (dollars: number) => (dollars < 0.01 ? `$${dollars.toFixed(4)}` : `$${dollars.toFixed(2)}`);
+
+  const runBatch = async (which: 'all' | 'failing') => {
+    const batch = batchFor(which);
+    setConfirmBatch(null);
+    try {
+      await requestRuns(batch.map((e) => ({ test: drafts[e.id]?.name ?? '', exampleId: e.id, repetitions })));
+      setBatchNotice({ kind: 'success', text: `Started ${batch.length} test${batch.length === 1 ? '' : 's'}. Dots update as each finishes.` });
+    } catch (error) {
+      setBatchNotice({ kind: 'error', text: `Could not start the runs: ${errorMessage(error)}` });
+    }
+  };
+
   const runTest = async () => {
     if (!selected || !draft) return;
     setRunning(true);
@@ -258,6 +381,38 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
           <Button size="sm" color="primary" onClick={() => addExample()} disabled={loading}>New</Button>
         </div>
       </div>
+      {/* Run several tests at once, like an IDE's test explorer. Both confirm first: every test is a real agent
+          run per repetition. "Failing" is every test whose newest result is red, amber or errored. */}
+      <div className="flex flex-wrap gap-space-1">
+        <Button size="sm" variant="outlined" color="secondary" onClick={() => setConfirmBatch('all')} disabled={loading || !savedExamples.length}>
+          Run all ({savedExamples.length})
+        </Button>
+        <Button size="sm" variant="outlined" color="secondary" onClick={() => setConfirmBatch('failing')} disabled={loading || !failingExamples.length}>
+          Run failing ({failingExamples.length})
+        </Button>
+      </div>
+      {confirmBatch ? (
+        <div className="flex flex-col gap-space-1 rounded-md border border-default p-space-2 text-xs text-secondary">
+          <span>
+            Run {batchFor(confirmBatch).length} test{batchFor(confirmBatch).length === 1 ? '' : 's'} × {repetitions} repetition{repetitions === 1 ? '' : 's'}
+            {' '}= {batchFor(confirmBatch).length * repetitions} agent runs, 8 tests at a time?
+          </span>
+          {(() => {
+            const { dollars, unpriced } = estimate(batchFor(confirmBatch));
+            return (
+              <span className="text-tertiary">
+                Estimated agent cost ≈ {formatDollars(dollars)}, from each test's last run
+                {unpriced ? ` (${unpriced} test${unpriced === 1 ? ' has' : 's have'} no priced run yet)` : ''}. Excludes grading.
+              </span>
+            );
+          })()}
+          <span className="flex gap-space-1">
+            <Button size="sm" color="primary" onClick={() => void runBatch(confirmBatch)}>Run</Button>
+            <Button size="sm" variant="outlined" color="secondary" onClick={() => setConfirmBatch(null)}>Cancel</Button>
+          </span>
+        </div>
+      ) : null}
+      {batchNotice ? <Text variant="xs" color={batchNotice.kind === 'error' ? 'error' : 'tertiary'}>{batchNotice.text}</Text> : null}
       {importing !== 'closed' ? (
         <div className="flex flex-col gap-space-2 rounded-md border border-default bg-surface-level-2 p-space-2">
           <div className="flex flex-col">
@@ -314,6 +469,8 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
               title={exampleDraft?.name || 'Untitled test'}
               subtitle={exampleDraft?.description || `${count} assertions`}
               badge={example.isNew ? 'new' : dirtyIds.has(example.id) ? '● unsaved' : `${count} asserts`}
+              status={example.isNew ? undefined : activeRuns[example.id] ?? (summaries[example.id]?.runningElsewhere ? 'running' : summaries[example.id]?.status)}
+              stale={!activeRuns[example.id] && staleness(summaries[example.id], hashes[example.id], metadata?.agentCommit, metadata?.sameAgentCommits) !== null}
               onClick={() => select(example.id)}
             />
           );
@@ -326,9 +483,7 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
     <main className="flex h-screen flex-col gap-space-4 overflow-hidden bg-surface-level-1 p-space-4 text-primary">
       <header className="flex flex-col">
         <Text variant="h1">Agent tests</Text>
-        <Text variant="sm" color="secondary">
-          Given (mocked tools) · When (prompt) · Assert (one-sentence assertions). Tests autosave to the {DATASET_NAME} dataset.
-        </Text>
+        
       </header>
 
       <div className={`grid min-h-0 flex-1 gap-space-4 ${showResults && selected && !selected.isNew ? 'grid-cols-[260px_minmax(0,1fr)_360px]' : 'grid-cols-[260px_minmax(0,1fr)]'}`}>
@@ -359,6 +514,11 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
                       ? `Not saved: ${built.error}`
                       : notice?.text ?? (saving ? 'Saving…' : dirty ? 'Unsaved changes…' : 'All changes saved')}
                   </Text>
+                  {!selected.isNew ? (
+                    <LastRun summary={summaries[selected.id]} error={lastError} onOpen={() => setShowResults(true)}
+                      onRun={dirty || running ? undefined : () => void runTest()}
+                      stale={dirty ? 'the test has unsaved edits' : staleness(summaries[selected.id], hashes[selected.id], metadata?.agentCommit, metadata?.sameAgentCommits)} />
+                  ) : null}
                 </div>
                 <div className="flex flex-wrap gap-space-2">
                   {!selected.isNew && metadata?.workspaceId ? (
@@ -373,18 +533,10 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
                       <Button size="sm" variant="outlined" color="secondary" onClick={() => setConfirmDelete(false)}>Cancel</Button>
                     </>
                   ) : (
-                    <DropdownMenu>
-                      <DropdownMenuTrigger asChild>
-                        <button type="button" aria-label="Test actions" className="inline-flex size-8 items-center justify-center rounded-md border border-default text-secondary hover:bg-surface-level-2 hover:text-primary">
-                          <DotsThreeIcon size={18} weight="bold" />
-                        </button>
-                      </DropdownMenuTrigger>
-                      <DropdownMenuContent align="end">
-                        <DropdownMenuItem onSelect={() => addExample(draft)}>Duplicate</DropdownMenuItem>
-                        <DropdownMenuSeparator />
-                        <DropdownMenuItem className="text-error-primary" disabled={saving} onSelect={() => setConfirmDelete(true)}>Delete…</DropdownMenuItem>
-                      </DropdownMenuContent>
-                    </DropdownMenu>
+                    <ActionsMenu label="Test actions" items={[
+                      { label: 'Duplicate', onSelect: () => addExample(draft) },
+                      { label: 'Delete…', danger: true, disabled: saving, onSelect: () => setConfirmDelete(true) },
+                    ]} />
                   )}
                 </div>
               </div>
@@ -392,15 +544,33 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
               <Section>
                 <div className="grid grid-cols-[minmax(0,240px)_minmax(0,1fr)] gap-space-3">
                   <TextField label="Name" value={draft.name} onChange={(name) => patchDraft({ name: name.toLowerCase().replace(/[\s_]+/g, '-') })} placeholder="refund-service-down" mono />
-                  <TextAreaField label="Description" value={draft.description} onChange={(description) => patchDraft({ description })} rows={1} placeholder="What this test covers" />
+                  <TextAreaField label="Description" value={draft.description} onChange={(description) => patchDraft({ description })} rows={1} maxRows={5} placeholder="What this test covers" />
                 </div>
               </Section>
 
-              <Section title="Given (environment)" hint="The world the agent runs in."
-                summary={`${draft.mockTools.length} mock tool${draft.mockTools.length === 1 ? '' : 's'}`}>
+              {/* Given is everything true before the prompt arrives: the agent's setup (context), the conversation so
+                  far (history) and what its tools answer (mocks). When is only the new message. */}
+              <Section title="Given (environment)" hint="The world the agent runs in, before the prompt arrives."
+                summary={[
+                  `${draft.mockTools.length} mock tool${draft.mockTools.length === 1 ? '' : 's'}`,
+                  draft.history.length ? `${draft.history.length} earlier turn${draft.history.length === 1 ? '' : 's'}` : '',
+                  draft.context.trim() ? 'context' : '',
+                  testFiles(selected).length ? `${testFiles(selected).length} file${testFiles(selected).length === 1 ? '' : 's'}` : '',
+                ].filter(Boolean).join(' · ')}>
+                <div className="flex flex-col gap-space-1">
+                  <TextAreaField label="Context (JSON object passed to the agent hook; empty = none)" value={draft.context} onChange={(context) => patchDraft({ context })}
+                    rows={draft.context ? Math.min(12, draft.context.split('\n').length + 1) : 2} mono placeholder='{"now": "2026-10-03T09:00:00Z", "flags": {"beta": true}}' />
+                  {contextProblem(draft.context) ? <span className="text-xs text-error-primary">{contextProblem(draft.context)}</span> : null}
+                </div>
+                {!selected.isNew ? (
+                  <FilesEditor exampleId={selected.id} files={testFiles(selected)}
+                    // Saved on the server already; the local copy takes the new list so the next autosave keeps it.
+                    onChange={(files) => setExamples((current) => current.map((row) => (row.id === selected.id ? withFiles(row, files) : row)))} />
+                ) : null}
+                <HistoryEditor history={draft.history} onChange={(history) => patchDraft({ history })} />
                 <Subsection
                   title="Mock tools"
-                  hint={`Every tool the agent may call in this test, with what it returns. A call to a tool that isn't listed fails, and so does the test (all-tools-mocked).${
+                  hint={`Every tool the agent may call in this test, with what it returns. A call to a tool that isn't listed makes the run an error: the test is incomplete, so it isn't graded.${
                     text(selected.inputs.recorded_on) ? ` Recorded ${text(selected.inputs.recorded_on)}: on each run, dates in these responses move forward by the days since then, so the data stays as fresh as it was that day.` : ''
                   }`}
                   addLabel="Add mock"
@@ -414,20 +584,25 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
                 </Subsection>
               </Section>
 
-              <Section title="When (input)" hint="What the agent is asked." summary={draft.prompt}>
+              <Section title="When (input)" hint="The new message the agent is sent." summary={draft.prompt}>
                 <TextAreaField value={draft.prompt} onChange={(prompt) => patchDraft({ prompt })} rows={3} placeholder="Order A1001 arrived broken, can I get my money back?" />
               </Section>
 
               <Section title="Assert (output)" hint="Each assertion is one sentence that must be true of the run. An LLM judge grades each one against the transcript and tool calls; its name becomes the feedback key."
-                summary={`${draft.assertions.length} assertion${draft.assertions.length === 1 ? '' : 's'}: ${draft.assertions.map((row) => row.name).join(', ')}`}>
+                summary={`${draft.assertions.length} assertion${draft.assertions.length === 1 ? '' : 's'}: ${draft.assertions.map((row) => row.name).join(', ')}${draft.checks.length ? ` · ${draft.checks.length} code check${draft.checks.length === 1 ? '' : 's'}` : ''}`}>
                 {draft.assertions.map((row) => (
                   <div key={row.key} className="flex flex-col gap-space-2 rounded-md border border-default bg-surface-level-1 p-space-3">
                     <div className="flex items-center gap-space-2">
                       <div className="w-64"><TextField value={row.name} onChange={(name) => patchRow('assertions', row.key, { name: name.toLowerCase().replace(/[\s_]+/g, '-') })} placeholder="assertion-name" mono /></div>
                       <div className="flex-1" />
+                      <ResultChip result={summaries[selected.id]?.keys[row.name]} ranAt={summaries[selected.id]?.ranAt ?? ''} stale={selectedStale}
+                        onOpen={() => setDrill(drill?.name === row.name ? null : { kind: 'assertion', name: row.name })} />
                       <RemoveButton label={`Remove assertion ${row.name}`} onClick={() => removeRow('assertions', row.key)} />
                     </div>
                     <TextAreaField value={row.assertion} onChange={(assertion) => patchRow('assertions', row.key, { assertion })} rows={2} placeholder="It tells the customer the refund could not be processed right now." />
+                    {drill?.kind === 'assertion' && drill.name === row.name && dataset ? (
+                      <AssertionDrilldown datasetId={dataset.id} exampleId={selected.id} testName={draft.name} name={row.name} kind="assertion" onClose={() => setDrill(null)} />
+                    ) : null}
                   </div>
                 ))}
                 <div>
@@ -435,6 +610,19 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
                     Add assertion
                   </Button>
                 </div>
+                <Subsection title="Code checks" hint="Deterministic checks on the tool calls, with no judge. Each name becomes a feedback key (1 or 0), like an assertion."
+                  addLabel="Add check" onAdd={() => patchDraft({ checks: [...draft.checks, emptyCheck()] })}>
+                  {draft.checks.length === 0 ? <Text variant="xs" color="tertiary">None.</Text> : null}
+                  {draft.checks.map((check) => (
+                    <CheckEditor key={check.key} check={check} tools={tools} onChange={(patch) => patchRow('checks', check.key, patch)} onRemove={() => removeRow('checks', check.key)}
+                      result={<ResultChip result={summaries[selected.id]?.keys[check.name]} ranAt={summaries[selected.id]?.ranAt ?? ''} stale={selectedStale}
+                        onOpen={() => setDrill(drill?.name === check.name ? null : { kind: 'check', name: check.name })} />} />
+                  ))}
+                  {drill?.kind === 'check' && dataset && draft.checks.some((c) => c.name === drill.name) ? (
+                    <AssertionDrilldown datasetId={dataset.id} exampleId={selected.id} testName={draft.name} name={drill.name} kind="check" onClose={() => setDrill(null)} />
+                  ) : null}
+
+                </Subsection>
               </Section>
 
               <div className="flex flex-col items-center gap-space-2 pb-space-4">

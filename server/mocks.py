@@ -7,10 +7,15 @@ A test's `inputs.mock_tools` maps a tool name to what it returns:
         {"when": {"tracking": "1Z9"}, "response": {...}},          of the call's arguments wins; a case
         {"response": "unknown tracking number"}]}                  without `when` matches anything
     "issue_refund": {"raise": "503 Service Unavailable"}          the call fails with that message
+    "generate_image": {"sequence": [{...}, {...}]}                a different response per call; the last repeats
+    "update_post": {"cases": [                                    `when_any_value` matches that value under any
+        {"when_any_value": "P1", "response": {"raise": "400"}},    argument name (and inside nested args)
+        {"response": "saved"}]}
 
 Replay is strict: a tool with no mock, or no matching case, never runs for real. The agent gets an error
-ToolMessage ("<tool> is not mocked in this test") and the call is recorded in `unmocked`, which the harness
-turns into a failing `all-tools-mocked` score. A test can only pass if it mocks everything the agent touched.
+ToolMessage ("<tool> is not mocked in this test") and the call is recorded in `unmocked`. The harness then
+fails the whole run as an incomplete test (an error, not a grade), so a test can only produce grades if it
+mocks everything the agent touched.
 
 Dates in responses (strings that start with YYYY-MM-DD) move forward by the days between `recorded_on` and
 today, so recorded data looks exactly as fresh on every run as it did the day it was recorded.
@@ -48,6 +53,24 @@ class NotMocked(Exception):
     pass
 
 
+def _case_matches(case: dict[str, Any], args: dict[str, Any]) -> bool:
+    if not all(args.get(arg) == want for arg, want in (case.get("when") or {}).items()):
+        return False
+    # Matched on a value, not an argument name: a mocked tool can't pin its schema, so the model may send the
+    # same record id as `post_id` on one run and `id` on the next.
+    if "when_any_value" in case:
+        return case["when_any_value"] in _all_values(args)
+    return True
+
+
+def _all_values(value: Any) -> list[Any]:
+    if isinstance(value, dict):
+        return [leaf for item in value.values() for leaf in _all_values(item)]
+    if isinstance(value, list):
+        return [leaf for item in value for leaf in _all_values(item)]
+    return [value]
+
+
 class MockTools:
     """One test's mocks. Create a fresh instance per run: it records the calls that run made."""
 
@@ -63,12 +86,19 @@ class MockTools:
         if name not in self.mocks:
             raise NotMocked(f"{name} is not mocked in this test")
         mock = self.mocks[name]
+        if isinstance(mock, dict) and set(mock) == {"sequence"}:
+            return shift_dates(self._next_in_sequence(name, mock["sequence"]), self.shift_days)
         if isinstance(mock, dict) and set(mock) == {"cases"}:
             for case in mock["cases"]:
-                if all(args.get(arg) == want for arg, want in (case.get("when") or {}).items()):
+                if _case_matches(case, args):
                     return shift_dates(case.get("response"), self.shift_days)
             raise NotMocked(f"{name} is not mocked in this test for arguments {json.dumps(args, sort_keys=True)}")
         return shift_dates(mock, self.shift_days)
+
+    def _next_in_sequence(self, name: str, responses: list[Any]) -> Any:
+        # The last response repeats so a test needn't predict the exact call count.
+        index = sum(1 for call in self.calls if call["name"] == name)
+        return responses[min(index, len(responses) - 1)]
 
     def call(self, name: str, args: dict[str, Any], tool_call_id: str) -> ToolMessage:
         try:
