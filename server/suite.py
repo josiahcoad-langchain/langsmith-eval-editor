@@ -3,6 +3,8 @@
 No network here, so all of it is unit-tested; cli.py does the I/O. A test (one dataset example) can carry
 pytest-style markers in its metadata:
 
+    status          "proposal"      an eval proposal still being shaped (proposals.py): left out of the suite
+                                    unless named or --proposals; "active" or unset is a real test
     tags            ["gate", ...]   select with --tag (pytest's -m)
     skip            "reason"        not run, reported as skipped (pytest.mark.skip)
     xfail           "reason"        expected to fail; passing FAILS the suite so the marker gets removed
@@ -78,12 +80,20 @@ class Outcome:
 
 # --- selection ---------------------------------------------------------------------------------------------------
 
+def is_proposal(metadata: dict[str, Any]) -> bool:
+    return metadata.get("status") == "proposal"
+
+
 def select(tests: list[Test], names: list[str] | None = None, keyword: str | None = None,
-           tags: list[str] | None = None, last_failed: set[str] | None = None) -> list[Test]:
-    """Filters compose (AND), like pytest's -k and -m together. `keyword` is a substring, or `not <substring>`."""
+           tags: list[str] | None = None, last_failed: set[str] | None = None, proposals: bool = False) -> list[Test]:
+    """Filters compose (AND), like pytest's -k and -m together. `keyword` is a substring, or `not <substring>`.
+
+    Proposals are left out unless `proposals` is set or they are named: a proposal isn't part of the eval set yet."""
     chosen = list(tests)
     if names:
         chosen = [x for x in chosen if x.name in names]
+    elif not proposals:
+        chosen = [x for x in chosen if not is_proposal(x.metadata)]
     if keyword:
         negate = keyword.startswith("not ")
         needle = keyword[4:] if negate else keyword

@@ -5,3 +5,5 @@ export const DATASET_NAME = import.meta.env.VITE_DATASET_NAME ?? 'eval-editor-de
 export const REQUESTS_REPO = import.meta.env.VITE_REQUESTS_REPO ?? 'eval-editor-run-requests';
 // The tracing project of the agent's real (non-eval) runs, for Import.
 export const TRACE_PROJECT = import.meta.env.VITE_TRACE_PROJECT ?? 'eval-editor-demo-agent';
+// Eval proposals: flagged traces land in this annotation queue (server/proposals.py creates it).
+export const PROPOSALS_QUEUE = import.meta.env.VITE_PROPOSALS_QUEUE ?? 'eval-editor-demo-proposals';

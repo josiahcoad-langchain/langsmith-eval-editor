@@ -2,7 +2,8 @@
 
 Each test (dataset example) is Given / When / Then:
   inputs.mock_tools, inputs.recorded_on   Given: every tool response the run may see (see mocks.py)
-  inputs.history                          Given: prior turns [{role, content}] sent before the prompt
+  inputs.history                          Given: prior turns [{role, content}] sent before the prompt (assistant
+                                          turns may carry tool_calls; role "tool" turns are their results)
   inputs.context                          Given: opaque JSON the hook uses to set the agent up (its own keys)
   inputs.attachments                      Given: files handed to the agent, stored as example attachments (files.py)
   inputs.prompt                           When: the message sent to the agent
@@ -47,7 +48,7 @@ from content_hash import content_hash  # noqa: E402
 from evidence import build_evidence  # noqa: E402
 from files import AgentRun, Attachment, FileProblem, describe, materialize  # noqa: E402
 from mocks import MockTools  # noqa: E402
-from suite import Repetition  # noqa: E402
+from suite import Repetition, is_proposal  # noqa: E402
 
 hook = load_hook()  # after load_dotenv: the agent reads its model settings at import
 
@@ -281,7 +282,9 @@ def run_tests(example_ids: list[str] | None = None, names: list[str] | None = No
     """Runs the chosen tests (default: all) side by side. Mocks live in each run, so tests never share state."""
     client = Client()
     examples = [e for e in client.list_examples(dataset_name=DATASET_NAME)
-                if (not example_ids or str(e.id) in example_ids) and (not names or test_name(e) in names)]
+                if (not example_ids or str(e.id) in example_ids) and (not names or test_name(e) in names)
+                # "Every test" means the eval set: proposals run only when asked for by id or name.
+                and (example_ids or names or not is_proposal(e.metadata or {}))]
     with ThreadPoolExecutor(max_workers=4) as pool:
         return list(pool.map(lambda e: run_test(e, repetitions, client), examples))
 

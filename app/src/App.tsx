@@ -15,9 +15,10 @@ import { FilesEditor } from './components/FilesEditor';
 import { MockToolEditor } from './components/MockToolEditor';
 import { ResultsPanel } from './components/ResultsPanel';
 import {
-  contextProblem, countToolCalls, deleteExample, emptyCheck, emptyExample, errorMessage, fetchAllExamples, fetchDataset, fetchPastRuns, fetchResults, fetchStatuses, importTrace, staleness,
-  isDirty, keyId, saveExampleTo, shortDate, testFiles, text, toDraft, toPayload, traceIdFrom, withFiles,
-  type Dataset, type Draft, type Example, type PastRun, type TestStatus, type TestSummary,
+  acceptProposal, contextProblem, countToolCalls, deleteExample, emptyCheck, emptyExample, errorMessage, fetchAllExamples, fetchDataset, fetchPastRuns,
+  fetchProposalQueue, fetchQueuedRuns, fetchResults, fetchStatuses, importTrace, isDirty, isProposal, keyId, proposalExample, removeFromQueue,
+  saveExampleTo, shortDate, staleness, testFiles, text, toDraft, toPayload, traceIdFrom, withFiles,
+  type Dataset, type Draft, type Example, type PastRun, type QueuedRun, type TestStatus, type TestSummary,
 } from './lib/data';
 import { fetchActiveRuns, isWeb, requestRun, requestRuns } from './runs';
 
@@ -157,6 +158,22 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
   const [repetitions, setRepetitions] = useState(3);
   const [running, setRunning] = useState(false);
   const [runStatus, setRunStatus] = useState<Notice>(null);
+  // The proposals inbox: the annotation queue's runs (flagged traces). A run that has been opened is a proposal
+  // example (metadata.source_run_id) and is listed as that instead.
+  const [queueId, setQueueId] = useState<string | null>(null);
+  const [queued, setQueued] = useState<QueuedRun[]>([]);
+  const [queueNotice, setQueueNotice] = useState<Notice>(null);
+  const [openingRun, setOpeningRun] = useState<string | null>(null);
+
+  const loadQueue = useCallback(async () => {
+    try {
+      const id = await fetchProposalQueue();
+      setQueueId(id);
+      setQueued(id ? await fetchQueuedRuns(id) : []);
+    } catch (error) {
+      setQueueNotice({ kind: 'error', text: `Could not read the proposals queue: ${errorMessage(error)}` });
+    }
+  }, []);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -177,7 +194,11 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
 
   useEffect(() => {
     void load();
-  }, [load]);
+    void loadQueue();
+    // New flagged traces arrive by run rule at any time.
+    const timer = window.setInterval(() => void loadQueue(), 60000);
+    return () => window.clearInterval(timer);
+  }, [load, loadQueue]);
 
   const selected = examples.find((example) => example.id === selectedId);
   const draft = selectedId ? drafts[selectedId] : undefined;
@@ -194,6 +215,7 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
     if (selected && draft && dirty && !built?.error) void saveExample(selected, draft);
     setSelectedId(id);
     setNotice(null);
+    setQueueNotice(null);
     setConfirmDelete(false);
     setRunStatus(null);
   };
@@ -227,6 +249,40 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
     }
   };
 
+  // A trace becomes a proposal, not a test: it joins the eval set only once the expert accepts it.
+  const importAsProposal = async (traceId: string, queueRunId?: string) => {
+    const { draft: imported, recordedOn, toolCalls } = await importTrace(traceId, tools);
+    const example = proposalExample(imported.prompt, recordedOn, traceId, queueRunId);
+    setExamples((current) => [...current, example]);
+    setDrafts((current) => ({ ...current, [example.id]: imported }));
+    select(example.id);
+    const turns = imported.history.filter((turn) => turn.role === 'user').length;
+    return `Imported as a proposal: ${toolCalls} tool call${toolCalls === 1 ? '' : 's'} as ${imported.mockTools.length} mock${imported.mockTools.length === 1 ? '' : 's'}`
+      + `${turns ? `, ${turns} earlier turn${turns === 1 ? '' : 's'} as history` : ''}. Add assertions, then run it.`;
+  };
+
+  const openQueued = async (run: QueuedRun) => {
+    setOpeningRun(run.runId);
+    setQueueNotice(null);
+    try {
+      setQueueNotice({ kind: 'success', text: await importAsProposal(run.traceId, run.runId) });
+    } catch (error) {
+      setQueueNotice({ kind: 'error', text: errorMessage(error) });
+    } finally {
+      setOpeningRun(null);
+    }
+  };
+
+  const dismissQueued = async (run: QueuedRun) => {
+    if (!queueId) return;
+    try {
+      await removeFromQueue(queueId, run.runId);
+      setQueued((current) => current.filter((row) => row.runId !== run.runId));
+    } catch (error) {
+      setQueueNotice({ kind: 'error', text: `Could not dismiss it: ${errorMessage(error)}` });
+    }
+  };
+
   const runImport = async (picked?: string) => {
     const traceId = picked ?? traceIdFrom(importRef);
     setImportingTrace(traceId ?? null);
@@ -237,14 +293,10 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
     setImporting('busy');
     setImportStatus(null);
     try {
-      const { draft: imported, recordedOn, toolCalls } = await importTrace(traceId, tools);
-      const example = { ...emptyExample(), inputs: { prompt: imported.prompt, recorded_on: recordedOn } };
-      setExamples((current) => [...current, example]);
-      setDrafts((current) => ({ ...current, [example.id]: imported }));
-      select(example.id);
+      const message = await importAsProposal(traceId);
       setImportRef('');
       setImporting('closed');
-      setImportStatus({ kind: 'success', text: `Imported ${toolCalls} tool calls as ${imported.mockTools.length} mocks. Add assertions, then run it.` });
+      setImportStatus({ kind: 'success', text: message });
     } catch (error) {
       setImporting('open');
       setImportStatus({ kind: 'error', text: errorMessage(error) });
@@ -314,6 +366,12 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
     setSaving(true);
     try {
       await deleteExample(selected.id);
+      // Deleting a proposal also takes its trace out of the queue, so it isn't proposed again.
+      const queueRun = text(selected.metadata.source_run_id);
+      if (isProposal(selected) && queueId && queueRun) {
+        await removeFromQueue(queueId, queueRun).catch(() => undefined);
+        setQueued((current) => current.filter((row) => row.runId !== queueRun));
+      }
       const remaining = examples.filter((example) => example.id !== selected.id);
       setExamples(remaining);
       setSelectedId(remaining[0]?.id);
@@ -326,7 +384,30 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
     }
   };
 
-  const savedExamples = examples.filter((e) => !e.isNew);
+  const accept = async () => {
+    if (!selected || selected.isNew || dirty) return;
+    setSaving(true);
+    try {
+      const accepted = await acceptProposal(selected);
+      setExamples((current) => current.map((row) => (row.id === accepted.id ? accepted : row)));
+      const queueRun = text(selected.metadata.source_run_id);
+      if (queueId && queueRun) {
+        await removeFromQueue(queueId, queueRun).catch(() => undefined);
+        setQueued((current) => current.filter((row) => row.runId !== queueRun));
+      }
+      setNotice({ kind: 'success', text: 'Accepted: it is part of the eval set now.' });
+    } catch (error) {
+      setNotice({ kind: 'error', text: `Accept failed: ${errorMessage(error)}` });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  // The eval set is every test that isn't a proposal; Run all, Run failing and the CLI work on it alone.
+  const savedExamples = examples.filter((e) => !e.isNew && !isProposal(e));
+  const proposalExamples = examples.filter(isProposal);
+  const openedRuns = new Set(examples.map((e) => text(e.metadata.source_run_id)).filter(Boolean));
+  const inbox = queued.filter((run) => !openedRuns.has(run.runId) && !run.hidden);
   const selectedStale = selected && !selected.isNew
     ? (dirty ? 'the test has unsaved edits' : staleness(summaries[selected.id], hashes[selected.id], metadata?.agentCommit, metadata?.sameAgentCommits))
     : null;
@@ -372,10 +453,58 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
     window.langsmith.openUrl(`/o/${metadata.workspaceId}/datasets/${dataset.id}/e/${selected.id}`, { newTab: true });
   };
 
+  const railRow = (example: Example) => {
+    const exampleDraft = drafts[example.id];
+    const count = exampleDraft?.assertions.filter((row) => row.name).length ?? 0;
+    return (
+      <RailButton
+        key={example.id}
+        active={example.id === selectedId}
+        title={exampleDraft?.name || 'Untitled test'}
+        subtitle={exampleDraft?.description || `${count} assertions`}
+        badge={example.isNew ? 'new' : dirtyIds.has(example.id) ? '● unsaved' : `${count} asserts`}
+        status={example.isNew ? undefined : activeRuns[example.id] ?? (summaries[example.id]?.runningElsewhere ? 'running' : summaries[example.id]?.status)}
+        stale={!activeRuns[example.id] && staleness(summaries[example.id], hashes[example.id], metadata?.agentCommit, metadata?.sameAgentCommits) !== null}
+        onClick={() => select(example.id)}
+      />
+    );
+  };
+
+  // Proposals first: the staging ground. Flagged traces not opened yet, then proposals being shaped into tests.
+  const proposalsSection = (
+    <div className="flex flex-col gap-space-2 border-b border-default pb-space-3">
+      <div className="flex flex-col">
+        <Text variant="md" weight="semibold">Proposals ({inbox.length + proposalExamples.length})</Text>
+        <Text variant="xs" color="tertiary">
+          {queueId ? 'Flagged traces and imports. Add assertions, run until the grades are consistent, then Accept into the eval set.'
+            : 'No proposals queue yet: start the server once (server/proposals.py creates it).'}
+        </Text>
+      </div>
+      {inbox.map((run) => (
+        <div key={run.runId} className="flex items-start gap-space-1 rounded-md border border-dashed border-default bg-surface-level-1 px-space-3 py-space-2">
+          <button type="button" className="flex min-w-0 flex-1 flex-col text-left" disabled={openingRun !== null} onClick={() => void openQueued(run)}>
+            <span className="flex items-center gap-space-1 text-sm">
+              <span className="shrink-0 rounded-sm bg-brand-subtle px-space-1 text-xs text-primary">flagged</span>
+              <span className="truncate text-secondary">{openingRun === run.runId ? 'Importing…' : shortDate(run.start)}</span>
+            </span>
+            <span className="line-clamp-2 text-xs text-primary">{run.prompt || '(no prompt)'}</span>
+            {run.turns ? <span className="text-xs text-tertiary">{run.turns} earlier turn{run.turns === 1 ? '' : 's'}</span> : null}
+          </button>
+          <button type="button" aria-label="Dismiss this flagged trace" title="Dismiss: take it out of the queue"
+            className="rounded-md px-space-1 text-tertiary hover:bg-surface-level-2 hover:text-primary" onClick={() => void dismissQueued(run)}>×</button>
+        </div>
+      ))}
+      {proposalExamples.map(railRow)}
+      {!inbox.length && !proposalExamples.length && queueId ? <Text variant="xs" color="tertiary">Nothing waiting.</Text> : null}
+      {queueNotice ? <Text variant="xs" color={queueNotice.kind === 'error' ? 'error' : 'tertiary'}>{queueNotice.text}</Text> : null}
+    </div>
+  );
+
   const rail = (
     <>
+      {proposalsSection}
       <div className="flex items-center justify-between">
-        <Text variant="md" weight="semibold">Tests ({examples.filter((e) => !e.isNew).length})</Text>
+        <Text variant="md" weight="semibold">Tests ({savedExamples.length})</Text>
         <div className="flex gap-space-1">
           <Button size="sm" variant="outlined" color="secondary" onClick={openImport} disabled={loading}>Import</Button>
           <Button size="sm" color="primary" onClick={() => addExample()} disabled={loading}>New</Button>
@@ -416,8 +545,8 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
       {importing !== 'closed' ? (
         <div className="flex flex-col gap-space-2 rounded-md border border-default bg-surface-level-2 p-space-2">
           <div className="flex flex-col">
-            <Text variant="sm" weight="semibold">Import a past run</Text>
-            <Text variant="xs" color="tertiary">Its prompt becomes When and its tool calls become mocks.</Text>
+            <Text variant="sm" weight="semibold">Import a past run as a proposal</Text>
+            <Text variant="xs" color="tertiary">Its last message becomes When, the turns before it History, and its tool calls mocks.</Text>
           </div>
           <input className={fieldClass} value={pastRunQuery} placeholder="Filter by prompt" aria-label="Filter past runs by prompt"
             onChange={(event) => setPastRunQuery(event.currentTarget.value)} />
@@ -459,22 +588,7 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
       ) : null}
       {importStatus ? <Text variant="xs" color={importStatus.kind === 'error' ? 'error' : 'tertiary'}>{importStatus.text}</Text> : null}
       <div className="flex flex-col gap-space-2">
-        {examples.map((example) => {
-          const exampleDraft = drafts[example.id];
-          const count = exampleDraft?.assertions.filter((row) => row.name).length ?? 0;
-          return (
-            <RailButton
-              key={example.id}
-              active={example.id === selectedId}
-              title={exampleDraft?.name || 'Untitled test'}
-              subtitle={exampleDraft?.description || `${count} assertions`}
-              badge={example.isNew ? 'new' : dirtyIds.has(example.id) ? '● unsaved' : `${count} asserts`}
-              status={example.isNew ? undefined : activeRuns[example.id] ?? (summaries[example.id]?.runningElsewhere ? 'running' : summaries[example.id]?.status)}
-              stale={!activeRuns[example.id] && staleness(summaries[example.id], hashes[example.id], metadata?.agentCommit, metadata?.sameAgentCommits) !== null}
-              onClick={() => select(example.id)}
-            />
-          );
-        })}
+        {examples.filter((e) => !isProposal(e)).map(railRow)}
       </div>
     </>
   );
@@ -535,11 +649,26 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
                   ) : (
                     <ActionsMenu label="Test actions" items={[
                       { label: 'Duplicate', onSelect: () => addExample(draft) },
-                      { label: 'Delete…', danger: true, disabled: saving, onSelect: () => setConfirmDelete(true) },
+                      { label: isProposal(selected) ? 'Delete proposal…' : 'Delete…', danger: true, disabled: saving, onSelect: () => setConfirmDelete(true) },
                     ]} />
                   )}
                 </div>
               </div>
+
+              {isProposal(selected) ? (
+                <div className="flex flex-wrap items-center justify-between gap-space-3 rounded-md border border-dashed border-focus bg-brand-subtle p-space-3">
+                  <div className="flex min-w-0 flex-col">
+                    <Text variant="sm" weight="semibold">Proposal · not in the eval set yet</Text>
+                    <Text variant="xs" color="secondary">
+                      Write assertions and fill in missing mocks, then run it. Accept once every assertion passes on every repetition; until then Run all and the CLI skip it.
+                    </Text>
+                  </div>
+                  <Button size="sm" color="primary" onClick={() => void accept()} disabled={selected.isNew || dirty || saving}
+                    title={selected.isNew || dirty ? 'Save the proposal first' : undefined}>
+                    Accept into eval set
+                  </Button>
+                </div>
+              ) : null}
 
               <Section>
                 <div className="grid grid-cols-[minmax(0,240px)_minmax(0,1fr)] gap-space-3">

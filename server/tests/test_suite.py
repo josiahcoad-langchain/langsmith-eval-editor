@@ -127,3 +127,11 @@ def test_a_real_failure_beside_an_outage_is_still_a_failure():
     outage = Repetition(error=None, scores={"assertions": None, "c": 1.0}, comments={})
     failed = Repetition(error=None, scores={"c": 0.0}, comments={})
     assert outcome(Test(id="t", name="x", metadata={}), [outage, failed]).verdict == "failed"
+
+
+def test_proposals_are_left_out_unless_asked_for_or_named():
+    tests = [t("refund-ok"), t("trace-1a2b", status="proposal"), t("shipping-late", status="active")]
+    assert names(select(tests)) == ["refund-ok", "shipping-late"]
+    assert names(select(tests, keyword="trace")) == []
+    assert names(select(tests, proposals=True)) == ["refund-ok", "trace-1a2b", "shipping-late"]
+    assert names(select(tests, names=["trace-1a2b"])) == ["trace-1a2b"]
