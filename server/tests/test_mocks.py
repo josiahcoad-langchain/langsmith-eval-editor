@@ -56,3 +56,18 @@ def test_dates_shift_by_days_since_recording():
                       recorded_on="2026-10-03", today=TODAY)
     assert mocks.respond("ship", {}) == {"eta": "2026-10-19", "at": "2026-10-14T09:00Z", "id": "2026-13-99"}
     assert shift_dates(["2026-01-01"], 0) == ["2026-01-01"]
+
+
+def test_sequence_is_safe_under_parallel_tool_calls():
+    from concurrent.futures import ThreadPoolExecutor
+
+    mocks = MockTools({"gen": {"sequence": [f"img-{i}" for i in range(20)]}}, today=TODAY)
+    with ThreadPoolExecutor(max_workers=20) as pool:
+        replies = list(pool.map(lambda i: mocks.call("gen", {}, f"c{i}").content, range(20)))
+    assert sorted(replies) == sorted(f"img-{i}" for i in range(20))
+
+
+def test_empty_sequence_is_unmocked_not_a_crash():
+    mocks = MockTools({"gen": {"sequence": []}}, today=TODAY)
+    assert mocks.call("gen", {}, "c1").status == "error"
+    assert mocks.unmocked == [{"name": "gen", "args": {}}]

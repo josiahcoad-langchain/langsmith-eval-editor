@@ -75,3 +75,9 @@ def test_unknown_type_or_missing_custom_handler_scores_none_rather_than_passing(
     # A typo must never read as a pass.
     assert grade({"type": "must_cal", "tools": []})["score"] is None
     assert grade({"type": "custom"})["score"] is None
+
+
+def test_a_check_missing_a_parameter_scores_none_without_sinking_the_others():
+    results = run_checks({"tool_calls": []}, [{"name": "cap", "type": "max_tool_calls"},
+                                              {"name": "none", "type": "must_not_call", "tools": ["x"]}])
+    assert [(r["key"], r["score"]) for r in results] == [("cap", None), ("none", 1)]
