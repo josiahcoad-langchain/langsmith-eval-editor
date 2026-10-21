@@ -34,6 +34,15 @@ def run_checks(outputs: dict, checks: list[dict], custom: CustomCheck | None = N
 
 
 def _run_one(outputs: dict, check: dict, custom: CustomCheck | None) -> dict:
+    # A check missing a parameter (or a custom_check that raises) scores None on its own key; raising here would
+    # lose every other check's grade for the run.
+    try:
+        return _grade(outputs, check, custom)
+    except Exception as error:  # noqa: BLE001
+        return _result(check, None, f"Check could not run: {type(error).__name__}: {error}")
+
+
+def _grade(outputs: dict, check: dict, custom: CustomCheck | None) -> dict:
     kind = check.get("type")
     if kind == "custom":
         if custom is None:

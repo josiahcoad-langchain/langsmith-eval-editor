@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 from datetime import date, timedelta
 from typing import Any
 
@@ -80,6 +81,8 @@ class MockTools:
         self.shift_days = ((today or date.today()) - recorded).days if recorded else 0
         self.calls: list[dict[str, Any]] = []
         self.unmocked: list[dict[str, Any]] = []
+        # Tool calls from one model turn run in parallel threads; a sequence picks its response by counting calls.
+        self._lock = threading.Lock()
 
     def respond(self, name: str, args: dict[str, Any]) -> Any:
         """The mocked response for one call. Raises NotMocked when the test has none for it."""
@@ -87,6 +90,8 @@ class MockTools:
             raise NotMocked(f"{name} is not mocked in this test")
         mock = self.mocks[name]
         if isinstance(mock, dict) and set(mock) == {"sequence"}:
+            if not mock["sequence"]:
+                raise NotMocked(f"{name} has an empty sequence in this test")
             return shift_dates(self._next_in_sequence(name, mock["sequence"]), self.shift_days)
         if isinstance(mock, dict) and set(mock) == {"cases"}:
             for case in mock["cases"]:
@@ -101,6 +106,10 @@ class MockTools:
         return responses[min(index, len(responses) - 1)]
 
     def call(self, name: str, args: dict[str, Any], tool_call_id: str) -> ToolMessage:
+        with self._lock:
+            return self._call(name, args, tool_call_id)
+
+    def _call(self, name: str, args: dict[str, Any], tool_call_id: str) -> ToolMessage:
         try:
             response = self.respond(name, args)
         except NotMocked as error:
