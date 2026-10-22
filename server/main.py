@@ -159,12 +159,18 @@ class SuggestRequest(BaseModel):
     reply: str = ""
     feedback: list[dict] = []
     existing: list[str] = []
+    history: list[dict] = []
+    mocks: dict = {}
+    trace_id: str = ""
 
 
 @app.post("/api/suggest-assertions")
 def suggest_assertions(body: SuggestRequest) -> dict:
-    """2-4 draft assertions for a proposal, from its prompt, original reply and flag (drafting.py)."""
-    return {"assertions": drafting.suggest_assertions(body.prompt, body.reply, body.feedback, body.existing)}
+    """2-4 draft assertions for a proposal, from everything known about the run: the agent's instructions and tools
+    (from the flagged trace, else the hook), the conversation before the message, the tool results, the original reply
+    and the flag (drafting.py)."""
+    return {"assertions": drafting.suggest_assertions(body.prompt, body.reply, body.feedback, body.existing,
+                                                      body.history, body.mocks, body.trace_id)}
 
 
 class RewriteRequest(BaseModel):

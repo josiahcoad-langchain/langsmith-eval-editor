@@ -166,9 +166,13 @@ async function postDrafts(path: string, body: Json): Promise<string[]> {
   return Array.isArray(answer.assertions) ? answer.assertions.map(text).filter(Boolean) : [];
 }
 
-// 2-4 assertions for a proposal, from its message, the original reply and the flag's comment.
-export function requestSuggestions(prompt: string, reply: string, feedback: Json[], existing: string[]) {
-  return postDrafts('/api/suggest-assertions', { prompt, reply, feedback, existing });
+// 2-4 assertions for a proposal, from everything known about its run: the message, the conversation before it
+// (`history`), what the tools returned (`mocks`), the original reply and the flag's comment. The server adds the
+// agent's system prompt and tool definitions, read from the trace (`traceId`) or the hook.
+export function requestSuggestions(run: { prompt: string; reply: string; feedback: Json[]; existing: string[]; history: Json[]; mocks: Json; traceId: string }) {
+  return postDrafts('/api/suggest-assertions', {
+    prompt: run.prompt, reply: run.reply, feedback: run.feedback, existing: run.existing, history: run.history, mocks: run.mocks, trace_id: run.traceId,
+  });
 }
 
 // 1-2 rewrites of an assertion Re-grade found ambiguous or unreliably graded, from the expert's and judges' reasons.

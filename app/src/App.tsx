@@ -350,8 +350,9 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
     }
   };
 
-  // Drafts 2-4 assertions from the proposal's message, original reply and flag. They go in as ordinary rows (an empty
-  // one is replaced), named from their sentences, for the expert to edit or delete.
+  // Drafts 2-4 assertions from everything known about the proposal's run (the agent's instructions and tools, the
+  // conversation, the tool results, the original reply and the flag). They go in as ordinary rows (an empty one is
+  // replaced), named from their sentences, for the expert to edit or delete.
   const suggestAssertions = async () => {
     if (!selected || !draft) return;
     const id = selected.id;
@@ -360,7 +361,14 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
     try {
       const feedback = Array.isArray(selected.metadata.source_feedback) ? selected.metadata.source_feedback.filter(isRecord) : [];
       const existing = draft.assertions.map((row) => row.assertion.trim()).filter(Boolean);
-      const sentences = await requestSuggestions(draft.prompt, text(selected.metadata.source_output), feedback, existing);
+      // The test as it would be saved: its history and mocks are what the run saw before and during the reply.
+      const inputs = toPayload(selected, draft).payload?.inputs ?? {};
+      const sentences = await requestSuggestions({
+        prompt: draft.prompt, reply: text(selected.metadata.source_output), feedback, existing,
+        history: Array.isArray(inputs.history) ? inputs.history.filter(isRecord) : [],
+        mocks: isRecord(inputs.mock_tools) ? inputs.mock_tools : {},
+        traceId: text(selected.metadata.source_trace_id),
+      });
       setDrafts((current) => {
         if (!current[id]) return current;
         const kept = current[id].assertions.filter((row) => row.assertion.trim() || row.name);

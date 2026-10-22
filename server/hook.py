@@ -26,7 +26,7 @@ from typing import Any
 
 from langchain_core.messages import BaseMessage
 
-from demo_agent import TOOLS, build_agent
+from demo_agent import INSTRUCTIONS, TOOLS, build_agent
 from mocks import MockTools
 
 TOOL_NAMES = [t.name for t in TOOLS]
@@ -38,3 +38,9 @@ def run_agent(prompt: str, mocks: MockTools, history: list[dict] | None = None,
     messages = [*(history or []), {"role": "user", "content": prompt}]
     result = agent.invoke({"messages": messages})
     return result["messages"]
+
+
+def agent_context() -> dict:
+    """Optional: the agent's instructions and tools, for drafting assertions when a test has no trace to read them
+    from (drafting.py). A flagged trace's own system prompt and tool definitions take precedence."""
+    return {"instructions": INSTRUCTIONS, "tools": [{"name": t.name, "description": t.description} for t in TOOLS]}
