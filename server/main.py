@@ -8,6 +8,8 @@ Standalone mode (the editor runs in your browser, served from here):
                           written against LangSmith's custom-app bridge (window.langsmith.call); in standalone
                           mode that bridge is a shim that forwards here, so one UI works in both modes.
   /api/runs               POST {example_ids, repetitions} runs tests (4 at a time, the rest queued); GET lists runs.
+  /api/regrade            re-grade one assertion over saved transcripts (regrade.py).
+  /api/suggest-assertions, /api/rewrite-assertion   assertion drafts from the judge model (drafting.py).
   /api/config             workspace URL, for links into LangSmith.
 
 Custom-app mode (the editor runs inside LangSmith and can't reach this server):
@@ -38,6 +40,7 @@ from pydantic import BaseModel
 load_dotenv()
 
 import attach  # noqa: E402
+import drafting  # noqa: E402
 import harness  # noqa: E402
 import proposals  # noqa: E402
 import regrade  # noqa: E402
@@ -149,6 +152,32 @@ def regrade_assertion(body: RegradeRequest) -> dict:
         return regrade.regrade(client, body.example_id, body.name, times=max(1, min(body.times, 5)))
     except ValueError as error:
         raise HTTPException(400, str(error)) from error
+
+
+class SuggestRequest(BaseModel):
+    prompt: str
+    reply: str = ""
+    feedback: list[dict] = []
+    existing: list[str] = []
+
+
+@app.post("/api/suggest-assertions")
+def suggest_assertions(body: SuggestRequest) -> dict:
+    """2-4 draft assertions for a proposal, from its prompt, original reply and flag (drafting.py)."""
+    return {"assertions": drafting.suggest_assertions(body.prompt, body.reply, body.feedback, body.existing)}
+
+
+class RewriteRequest(BaseModel):
+    assertion: str
+    cause: str
+    expert_reasons: list[str] = []
+    judge_reasons: list[str] = []
+
+
+@app.post("/api/rewrite-assertion")
+def rewrite_assertion(body: RewriteRequest) -> dict:
+    """1-2 rewrites of an assertion Re-grade found ambiguous or unreliably graded (drafting.py)."""
+    return {"assertions": drafting.rewrite_assertion(body.assertion, body.cause, body.expert_reasons, body.judge_reasons)}
 
 
 @app.get("/api/runs")

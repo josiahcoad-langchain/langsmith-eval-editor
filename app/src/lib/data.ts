@@ -163,6 +163,26 @@ export function slugify(sentence: string, words = 5) {
   return sentence.toLowerCase().replace(/[^a-z0-9\s-]/g, ' ').split(/\s+/).filter(Boolean).slice(0, words).join('-').slice(0, 48);
 }
 
+// Quiet hints under an assertion, for wordings judges tend to grade inconsistently. Advice, never a blocker.
+const VAGUE = /\b(appropriate(?:ly)?|good|properly|proper|correctly|reasonabl[ey]|adequate(?:ly)?|helpful|nice|suitabl[ey]|relevant)\b/i;
+const OBSERVABLE_VERB = 'says?|tells?|asks?|calls?|mentions?|offers?|repl(?:y|ies)|responds?|refuses?|declines?|includes?|quotes?|confirms?|apologi[sz]es?|promises?|recommends?|uses?|lists?|gives?|states?|explains?|escalates?|creates?|sends?|books?|cancels?|returns?|provides?|suggests?|names?|cites?|links?|writes?|answers?|shows?|requests?|summari[sz]es?|informs?|notes?|warns?|reports?|issues?|looks? up|checks?|refunds?|pass(?:es)?';
+const OBSERVABLE = new RegExp(`\\b(${OBSERVABLE_VERB}|does not|doesn't|never|only|before|after)\\b|\`|\\w+_\\w+|"[^"]+"`, 'i');
+const SECOND_CLAIM = new RegExp(`^(it|the agent|they|then|also|never|does|doesn't|is|isn't|will|won't|must|can't|cannot|${OBSERVABLE_VERB})\\b`, 'i');
+
+export function assertionHints(sentence: string): string[] {
+  const words = sentence.trim().split(/\s+/).filter(Boolean);
+  if (words.length < 4) return [];
+  const hints: string[] = [];
+  const parts = sentence.split(/,?\s+and\s+/i);
+  if (parts.slice(1).some((right, i) => parts[i].trim().split(/\s+/).length >= 3 && SECOND_CLAIM.test(right.trim()))) {
+    hints.push('Two claims joined by “and”? Split them into two assertions, so a failure says which one broke.');
+  }
+  const vague = VAGUE.exec(sentence)?.[1];
+  if (vague) hints.push(`“${vague}” is vague: judges read it differently. Say what the agent does instead.`);
+  if (!OBSERVABLE.test(sentence)) hints.push('Nothing here shows in a transcript. Say what the agent says, asks or calls.');
+  return hints;
+}
+
 // A default name for a code check, from its type and the tool it's about, so a new check never blocks saving.
 export function autoCheckName(check: Pick<Check, 'type' | 'tool' | 'groups' | 'first' | 'second'>) {
   const tool = check.tool || check.groups.flat().find(Boolean) || check.second || '';
@@ -494,7 +514,7 @@ export async function fetchReasons(runIds: string[], key: string): Promise<Recor
 // --- Human labels: the right verdict for one assertion on one run, for the judge bench (server/bench.py) ---------
 
 const LABEL_KEY = 'human-label';
-export type Label = { feedbackId: string; correct: boolean };
+export type Label = { feedbackId: string; correct: boolean; comment: string };
 
 // One feedback item per (run, assertion): key human-label, score = the right verdict (1 pass, 0 fail), value = the
 // assertion's name. Read per run, like the reasons, because it is only needed for one test's newest repetitions.
@@ -502,19 +522,20 @@ export async function fetchLabels(runIds: string[], name: string): Promise<Recor
   const pairs = await Promise.all(runIds.map(async (runId) => {
     const page = await callLangSmith<unknown>('GET /api/v1/feedback', { params: { run: runId, key: LABEL_KEY, limit: '50' } });
     const mine = (Array.isArray(page) ? page : []).filter(isRecord).find((f) => text(f.value) === name);
-    return mine ? [[runId, { feedbackId: text(mine.id), correct: mine.score === 1 }] as const] : [];
+    return mine ? [[runId, { feedbackId: text(mine.id), correct: mine.score === 1, comment: text(mine.comment) }] as const] : [];
   }));
   return Object.fromEntries(pairs.flat());
 }
 
-export async function saveLabel(runId: string, name: string, correct: boolean, existing?: Label): Promise<Label> {
+// `comment` is the expert's reason when the judge was wrong; Re-grade's rewrites are built from these reasons.
+export async function saveLabel(runId: string, name: string, correct: boolean, existing?: Label, comment = ''): Promise<Label> {
   const score = correct ? 1 : 0;
   if (existing) {
-    await callLangSmith(`PATCH /api/v1/feedback/${existing.feedbackId}`, { body: { score } });
-    return { ...existing, correct };
+    await callLangSmith(`PATCH /api/v1/feedback/${existing.feedbackId}`, { body: { score, comment } });
+    return { ...existing, correct, comment };
   }
-  const created = await callLangSmith<unknown>('POST /api/v1/feedback', { body: { run_id: runId, key: LABEL_KEY, score, value: name } });
-  return { feedbackId: isRecord(created) ? text(created.id) : '', correct };
+  const created = await callLangSmith<unknown>('POST /api/v1/feedback', { body: { run_id: runId, key: LABEL_KEY, score, value: name, ...(comment ? { comment } : {}) } });
+  return { feedbackId: isRecord(created) ? text(created.id) : '', correct, comment };
 }
 
 // --- Test status (the dot in the test list) ---------------------------------------------------------------------
@@ -781,16 +802,36 @@ function toolResponse(run: Json): unknown {
   return typeof content === 'string' ? parseResponse(content) : content;
 }
 
-// Builds a test from a recorded trace: the user's prompt becomes When, and every call to one of the agent's tools
-// becomes a mock (one case per distinct argument set). Assertions are left for the user to write.
-export async function importTrace(traceId: string, agentTools: string[]) {
+// A recorded trace: its root run and its calls to the agent's tools, oldest first. Read once for the preview and
+// reused by Make proposal, so confirming doesn't fetch it again.
+export type Trace = { traceId: string; root: Json; toolRuns: Json[] };
+
+export async function fetchTrace(traceId: string, agentTools: string[]): Promise<Trace> {
   const [root] = await queryAll({ trace: traceId, is_root: true, limit: 1 });
   if (!root) throw new Error('No trace with that ID in this workspace.');
+  if (root.inputs == null) throw new Error("This trace's inputs are hidden, so there is nothing to import.");
   const toolRuns = (await queryAll({ trace: traceId, run_type: 'tool', limit: 100 }))
     .filter((run) => !agentTools.length || agentTools.includes(text(run.name)))
     .sort((a, b) => String(a.start_time).localeCompare(String(b.start_time)));
-  if (root.inputs == null) throw new Error("This trace's inputs are hidden, so there is nothing to import.");
+  return { traceId, root, toolRuns };
+}
 
+// What the preview shows before anything is written: the message, the agent's reply and its tool calls, in the
+// shape a test result's tool calls have ({name, args, result | error}).
+export function tracePreview(trace: Trace) {
+  const { prompt, history } = promptAndHistory(trace.root.inputs);
+  const toolCalls = trace.toolRuns.map((run): Json => {
+    const response = toolResponse(run);
+    const raised = isRecord(response) && 'raise' in response && Object.keys(response).length === 1;
+    return { name: text(run.name), args: isRecord(run.inputs) ? run.inputs : {}, ...(raised ? { error: text(response.raise) } : { result: response }) };
+  });
+  return { prompt, turns: history.filter((t) => t.role === 'user').length, reply: finalReply(trace.root.outputs), toolCalls, start: text(trace.root.start_time) };
+}
+
+// Builds a test from a recorded trace: the user's prompt becomes When, and every call to one of the agent's tools
+// becomes a mock (one case per distinct argument set). Assertions are left for the user to write.
+export function importTrace(trace: Trace) {
+  const { traceId, root, toolRuns } = trace;
   const byTool = new Map<string, { args: Json; response: unknown }[]>();
   for (const run of toolRuns) {
     const name = text(run.name);

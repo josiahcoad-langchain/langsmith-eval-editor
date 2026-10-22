@@ -1,13 +1,16 @@
 import { useEffect, useState } from 'react';
 import { Button } from '@langchain/macaw-components/Button';
 import { Spinner } from '@langchain/macaw-components/Spinner';
-import { errorMessage, fetchLabels, fetchReasons, fetchResults, mockGaps, openTrace, saveLabel, shortDate, text, type Json, type Label, type MockGap, type TestResult } from '../lib/data';
-import { isWeb, requestRegrade, type Regrade } from '../runs';
+import { errorMessage, fetchLabels, fetchReasons, fetchResults, mockGaps, openTrace, saveLabel, shortDate, type Label, type MockGap, type TestResult } from '../lib/data';
+import { isWeb, requestRegrade, requestRewrites, type Regrade } from '../runs';
 import { Markdown } from './Markdown';
+import { clip, ToolCalls } from './ToolCalls';
 
 // One assertion's (or code check's) grades on the test's newest run, each beside what the agent actually did, so
 // "was the agent wrong, or the grade?" can be answered by reading. For an assertion, Re-grade grades the SAME saved
 // transcripts again with every judge the hook offers and says which of agent, judge or assertion is the cause.
+
+const REWRITABLE: Regrade['cause'][] = ['assertion_ambiguous', 'judge_unreliable'];
 
 const CAUSE: Record<Regrade['cause'], { label: string; tone: string }> = {
   agent_varied: { label: 'The agent varied', tone: 'text-warning-primary' },
@@ -18,9 +21,11 @@ const CAUSE: Record<Regrade['cause'], { label: string; tone: string }> = {
   consistent_pass: { label: 'Passes every time, by every judge', tone: 'text-success-primary' },
 };
 
-export function AssertionDrilldown({ datasetId, exampleId, testName, name, kind, onClose, onAddMock }: {
+export function AssertionDrilldown({ datasetId, exampleId, testName, name, kind, onClose, onAddMock, onRewrite }: {
   datasetId: string; exampleId: string; testName: string; name: string; kind: 'assertion' | 'check'; onClose: () => void;
   onAddMock?: (gap: MockGap) => void;
+  // Replaces the assertion's sentence in the draft (its name stays, so its results stay together).
+  onRewrite?: (assertion: string) => void;
 }) {
   const [runs, setRuns] = useState<TestResult[] | null>(null);
   const [reasons, setReasons] = useState<Record<string, string>>({});
@@ -52,11 +57,31 @@ export function AssertionDrilldown({ datasetId, exampleId, testName, name, kind,
     setRegrading(true);
     setRegradeError('');
     try {
-      setRegrade(await requestRegrade(exampleId, name));
+      const result = await requestRegrade(exampleId, name);
+      setRegrade(result);
+      if (REWRITABLE.includes(result.cause)) void loadRewrites(result);
     } catch (error) {
       setRegradeError(errorMessage(error));
     } finally {
       setRegrading(false);
+    }
+  };
+
+  // An ambiguous or unreliably graded assertion gets 1-2 rewrites, built from the expert's "judge was wrong" reasons
+  // and the judges' reasons on the repetitions they disputed.
+  const [rewrites, setRewrites] = useState<string[] | null>(null);
+  const [rewriteState, setRewriteState] = useState<'idle' | 'loading' | 'applied' | string>('idle');
+  const loadRewrites = async (result: Regrade) => {
+    setRewrites(null);
+    setRewriteState('loading');
+    const disputed = new Set([...result.disputed_repetitions, ...result.overturned_repetitions]);
+    const judgeReasons = result.repetitions.filter((rep) => !disputed.size || disputed.has(rep.number)).flatMap((rep) => Object.values(rep.reasons));
+    const expertReasons = Object.values(labels).map((label) => label.comment).filter(Boolean);
+    try {
+      setRewrites(await requestRewrites(result.assertion.assertion, result.cause, expertReasons, [...new Set(judgeReasons)]));
+      setRewriteState('idle');
+    } catch (error) {
+      setRewriteState(`Could not draft rewrites: ${errorMessage(error)}`);
     }
   };
 
@@ -97,14 +122,14 @@ export function AssertionDrilldown({ datasetId, exampleId, testName, name, kind,
             ) : null}
             {kind === 'assertion' && grade && grade.score !== null && !run.error && !mockGaps(run).length ? (
               <JudgeLabel judgedPass={grade.score === 1} label={labels[run.runId]}
-                onLabel={async (judgeRight) => {
+                onLabel={async (judgeRight, reason) => {
                   // The label is the RIGHT verdict: the judge's when it was right, the opposite when it wasn't.
                   const correct = judgeRight === (grade.score === 1);
-                  const saved = await saveLabel(run.runId, name, correct, labels[run.runId]);
+                  const saved = await saveLabel(run.runId, name, correct, labels[run.runId], reason);
                   setLabels((current) => ({ ...current, [run.runId]: saved }));
                 }} />
             ) : null}
-            {run.toolCalls.length ? <ToolCalls calls={run.toolCalls} /> : <span className="text-tertiary">No tool calls.</span>}
+            <ToolCalls calls={run.toolCalls} />
           </div>
         );
       })}
@@ -124,6 +149,25 @@ export function AssertionDrilldown({ datasetId, exampleId, testName, name, kind,
           <span className="text-tertiary">Grades these same replies again, 3 times with each judge. Does not run the agent; costs only the judges.</span>
           {regradeError ? <span className="text-error-primary">{regradeError}</span> : null}
           {regrade ? <RegradeResult result={regrade} /> : null}
+          {regrade && REWRITABLE.includes(regrade.cause) ? (
+            <div className="flex flex-col gap-space-1 rounded-sm border border-default bg-surface-level-1 p-space-2">
+              <span className="font-medium text-primary">Try a clearer wording</span>
+              {rewriteState === 'loading' ? <span className="flex items-center gap-space-1 text-tertiary"><Spinner size="sm" />Drafting from the reasons above…</span> : null}
+              {rewriteState === 'applied' ? <span className="text-success-primary">Applied to the test. Run it again to see whether the grades now agree.</span> : null}
+              {rewriteState !== 'idle' && rewriteState !== 'loading' && rewriteState !== 'applied' ? <span className="text-error-primary">{rewriteState}</span> : null}
+              {rewrites?.length === 0 ? <span className="text-tertiary">No rewrite came back.</span> : null}
+              {rewriteState !== 'applied' ? rewrites?.map((rewrite) => (
+                <span key={rewrite} className="flex items-start gap-space-2">
+                  <span className="flex-1 text-primary">{rewrite}</span>
+                  {onRewrite ? (
+                    <button type="button" className="shrink-0 rounded-sm border border-default bg-surface-level-1 px-space-2 text-primary hover:border-focus"
+                      onClick={() => { onRewrite(rewrite); setRewriteState('applied'); }}>Use this</button>
+                  ) : null}
+                </span>
+              )) : null}
+              <span className="text-tertiary">Built from your "judge was wrong" reasons and the judges' reasons. The name stays, so its results stay together.</span>
+            </div>
+          ) : null}
         </div>
       ) : (
         <span className="text-tertiary">Re-grade needs the eval server (web mode).</span>
@@ -132,41 +176,42 @@ export function AssertionDrilldown({ datasetId, exampleId, testName, name, kind,
   );
 }
 
-// "Was the judge right?" Each answer is a labelled item for the judge bench (server/bench.py).
-function JudgeLabel({ judgedPass, label, onLabel }: { judgedPass: boolean; label?: Label; onLabel: (judgeRight: boolean) => Promise<void> }) {
+// "Was the judge right?" Each answer is a labelled item for the judge bench (server/bench.py). "No" asks why first:
+// the reason is the label's comment, and Re-grade's rewrites are built from these reasons.
+function JudgeLabel({ judgedPass, label, onLabel }: { judgedPass: boolean; label?: Label; onLabel: (judgeRight: boolean, reason?: string) => Promise<void> }) {
   const [saving, setSaving] = useState(false);
+  const [reason, setReason] = useState<string | null>(null);
+  const [error, setError] = useState('');
   const judgeRight = label ? label.correct === judgedPass : null;
-  const click = async (right: boolean) => {
+  const save = async (right: boolean, why?: string) => {
     setSaving(true);
-    try { await onLabel(right); } finally { setSaving(false); }
+    setError('');
+    try { await onLabel(right, why); setReason(null); } catch (err) { setError(`Could not save the label: ${errorMessage(err)}`); } finally { setSaving(false); }
   };
   const button = (right: boolean, text: string) => (
-    <button type="button" disabled={saving} onClick={() => void click(right)}
+    <button type="button" disabled={saving} onClick={() => (right ? void save(true) : setReason(label?.comment ?? ''))}
       className={`rounded-sm border px-space-2 ${judgeRight === right ? 'border-focus bg-selected text-primary' : 'border-default text-secondary hover:text-primary'}`}>
       {text}
     </button>
   );
   return (
-    <span className="flex items-center gap-space-1 text-tertiary">
-      Judge right? {button(true, '✓ yes')} {button(false, '✗ no')}
-      {label ? <span>labelled: should {label.correct ? 'pass' : 'fail'}</span> : null}
+    <span className="flex flex-col gap-space-1 text-tertiary">
+      <span className="flex items-center gap-space-1">
+        Judge right? {button(true, '✓ yes')} {button(false, '✗ no')}
+        {label ? <span>labelled: should {label.correct ? 'pass' : 'fail'}{label.comment ? ` · “${label.comment}”` : ''}</span> : null}
+      </span>
+      {reason !== null ? (
+        <span className="flex items-center gap-space-1">
+          <input className="min-w-0 flex-1 rounded-sm border border-default bg-surface-level-1 px-space-2 py-px text-xs text-primary outline-none focus:border-focus"
+            autoFocus value={reason} aria-label="Why the judge was wrong" placeholder={`Why? e.g. it ${judgedPass ? 'never asked for' : 'did give'} the order number`}
+            onChange={(event) => setReason(event.currentTarget.value)}
+            onKeyDown={(event) => { if (event.key === 'Enter') void save(false, reason.trim()); if (event.key === 'Escape') setReason(null); }} />
+          <button type="button" disabled={saving} className="rounded-sm border border-default px-space-2 text-primary hover:border-focus" onClick={() => void save(false, reason.trim())}>Save</button>
+          <button type="button" disabled={saving} className="text-secondary hover:text-primary" onClick={() => setReason(null)}>Cancel</button>
+        </span>
+      ) : null}
+      {error ? <span className="text-error-primary">{error}</span> : null}
     </span>
-  );
-}
-
-function ToolCalls({ calls }: { calls: Json[] }) {
-  return (
-    <details>
-      <summary className="cursor-pointer text-tertiary">Tool calls: {calls.map((c) => text(c.name)).join(', ')}</summary>
-      <div className="mt-space-1 flex flex-col gap-space-1">
-        {calls.map((call, index) => (
-          <div key={index} className="rounded-sm bg-surface-level-2 p-space-1 font-mono">
-            <div className={call.error ? 'text-error-primary' : 'text-primary'}>{text(call.name)}({clip(JSON.stringify(call.args ?? {}))})</div>
-            <div className="text-tertiary">→ {clip(call.error ? text(call.error) : JSON.stringify(call.result ?? null))}</div>
-          </div>
-        ))}
-      </div>
-    </details>
   );
 }
 
@@ -229,8 +274,4 @@ function GapBanner({ gaps, onAddMock }: { gaps: MockGap[]; onAddMock?: (gap: Moc
       ))}
     </div>
   );
-}
-
-function clip(value: string, length = 300) {
-  return value.length > length ? `${value.slice(0, length)}…` : value;
 }

@@ -15,13 +15,14 @@ import { FilesEditor } from './components/FilesEditor';
 import { MockToolEditor } from './components/MockToolEditor';
 import { ResultsPanel } from './components/ResultsPanel';
 import { SourcePanel } from './components/SourcePanel';
+import { TracePreview } from './components/TracePreview';
 import {
-  acceptProposal, autoCheckName, contextProblem, countToolCalls, deleteExample, emptyCheck, emptyExample, errorMessage, fetchAllExamples, fetchDataset, fetchPastRuns,
+  acceptProposal, assertionHints, autoCheckName, contextProblem, countToolCalls, deleteExample, emptyCheck, emptyExample, errorMessage, fetchAllExamples, fetchDataset, fetchPastRuns, fetchTrace, isRecord,
   fetchProposalQueue, fetchQueuedRuns, fetchResults, fetchRunFeedback, fetchStatuses, importTrace, isDirty, isProposal, keyId, proposalExample, removeFromQueue,
   saveExampleTo, setKnownBug, shortDate, slugify, staleness, testFiles, text, toDraft, toPayload, traceIdFrom, withFiles,
-  type Dataset, type Draft, type Example, type MockGap, type PastRun, type QueuedRun, type TestStatus, type TestSummary,
+  type Dataset, type Draft, type Example, type MockGap, type PastRun, type QueuedRun, type SourceFeedback, type TestStatus, type TestSummary, type Trace,
 } from './lib/data';
-import { fetchActiveRuns, isWeb, requestRun, requestRuns } from './runs';
+import { fetchActiveRuns, isWeb, requestRun, requestRuns, requestSuggestions } from './runs';
 
 const AUTOSAVE_MS = 800;
 const REPETITION_CHOICES = [1, 3, 5];
@@ -149,14 +150,22 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
     const timer = window.setInterval(() => void poll(), 3000);
     return () => { cancelled = true; window.clearInterval(timer); };
   }, []);
-  const [importing, setImporting] = useState<'closed' | 'open' | 'busy'>('closed');
+  const [importing, setImporting] = useState<'closed' | 'open'>('closed');
   const [importRef, setImportRef] = useState('');
   const [importStatus, setImportStatus] = useState<Notice>(null);
   const [pastRuns, setPastRuns] = useState<PastRun[] | null>(null);
   const [pastRunError, setPastRunError] = useState<string | null>(null);
   const [pastRunQuery, setPastRunQuery] = useState('');
   const [toolCallCounts, setToolCallCounts] = useState<Record<string, number>>({});
-  const [importingTrace, setImportingTrace] = useState<string | null>(null);
+  // A flagged trace or past run being read before it becomes a proposal (TracePreview). Nothing is written yet.
+  const [preview, setPreview] = useState<{
+    source: 'flagged' | 'past run'; traceId: string; queueRunId?: string; trace: Trace | null; feedback: SourceFeedback[]; error: string;
+  } | null>(null);
+  const [making, setMaking] = useState(false);
+  // Suggest assertions on a proposal (web mode): the test it is for while drafting, then what came of it.
+  const [suggesting, setSuggesting] = useState<string | null>(null);
+  const [suggestNotice, setSuggestNotice] = useState<Notice>(null);
+  const previewing = useRef('');
   const [showResults, setShowResults] = useState(false);
   const [repetitions, setRepetitions] = useState(3);
   const [running, setRunning] = useState(false);
@@ -166,7 +175,6 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
   const [queueId, setQueueId] = useState<string | null>(null);
   const [queued, setQueued] = useState<QueuedRun[]>([]);
   const [queueNotice, setQueueNotice] = useState<Notice>(null);
-  const [openingRun, setOpeningRun] = useState<string | null>(null);
 
   const loadQueue = useCallback(async () => {
     try {
@@ -217,6 +225,8 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
     // Flush pending edits on the test being left instead of waiting for its autosave timer.
     if (selected && draft && dirty && !built?.error) void saveExample(selected, draft);
     setSelectedId(id);
+    setPreview(null);
+    setSuggestNotice(null);
     setNotice(null);
     setQueueNotice(null);
     setConfirmDelete(false);
@@ -282,11 +292,9 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
   };
 
   // A trace becomes a proposal, not a test: it joins the eval set only once the expert accepts it.
-  const importAsProposal = async (traceId: string, queueRunId?: string) => {
-    const { draft: imported, recordedOn, toolCalls, sourceOutput, rootRunId } = await importTrace(traceId, tools);
-    // The feedback that flagged it (a thumbs-down and its comment) sits on the queued run, or on the trace's root run.
-    const feedback = await fetchRunFeedback(queueRunId || rootRunId).catch(() => []);
-    const example = proposalExample(imported.prompt, recordedOn, traceId, queueRunId, { output: sourceOutput, feedback });
+  const importAsProposal = (trace: Trace, feedback: SourceFeedback[], queueRunId?: string) => {
+    const { draft: imported, recordedOn, toolCalls, sourceOutput } = importTrace(trace);
+    const example = proposalExample(imported.prompt, recordedOn, trace.traceId, queueRunId, { output: sourceOutput, feedback });
     setExamples((current) => [...current, example]);
     setDrafts((current) => ({ ...current, [example.id]: imported }));
     select(example.id);
@@ -295,17 +303,42 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
       + `${turns ? `, ${turns} earlier turn${turns === 1 ? '' : 's'} as history` : ''}. Add assertions, then run it.`;
   };
 
-  const openQueued = async (run: QueuedRun) => {
-    setOpeningRun(run.runId);
+  // Reads a trace for the preview. The feedback that flagged it (a thumbs-down and its comment) sits on the queued
+  // run, or on the trace's root run.
+  const openPreview = async (source: 'flagged' | 'past run', traceId: string, queueRunId?: string) => {
+    previewing.current = traceId;
+    setPreview({ source, traceId, queueRunId, trace: null, feedback: [], error: '' });
     setQueueNotice(null);
+    setImportStatus(null);
     try {
-      setQueueNotice({ kind: 'success', text: await importAsProposal(run.traceId, run.runId) });
+      const trace = await fetchTrace(traceId, tools);
+      const feedback = await fetchRunFeedback(queueRunId || text(trace.root.id)).catch(() => []);
+      if (previewing.current === traceId) setPreview((current) => (current?.traceId === traceId ? { ...current, trace, feedback } : current));
     } catch (error) {
-      setQueueNotice({ kind: 'error', text: errorMessage(error) });
-    } finally {
-      setOpeningRun(null);
+      if (previewing.current === traceId) setPreview((current) => (current?.traceId === traceId ? { ...current, error: errorMessage(error) } : current));
     }
   };
+
+  const makeProposal = () => {
+    if (!preview?.trace) return;
+    setMaking(true);
+    try {
+      const message = importAsProposal(preview.trace, preview.feedback, preview.queueRunId);
+      if (preview.source === 'flagged') setQueueNotice({ kind: 'success', text: message });
+      else {
+        setImportRef('');
+        setImporting('closed');
+        setImportStatus({ kind: 'success', text: message });
+      }
+      setPreview(null);
+    } catch (error) {
+      setPreview({ ...preview, error: errorMessage(error) });
+    } finally {
+      setMaking(false);
+    }
+  };
+
+  const openQueued = (run: QueuedRun) => void openPreview('flagged', run.traceId, run.runId);
 
   const dismissQueued = async (run: QueuedRun) => {
     if (!queueId) return;
@@ -317,26 +350,40 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
     }
   };
 
-  const runImport = async (picked?: string) => {
+  // Drafts 2-4 assertions from the proposal's message, original reply and flag. They go in as ordinary rows (an empty
+  // one is replaced), named from their sentences, for the expert to edit or delete.
+  const suggestAssertions = async () => {
+    if (!selected || !draft) return;
+    const id = selected.id;
+    setSuggesting(id);
+    setSuggestNotice(null);
+    try {
+      const feedback = Array.isArray(selected.metadata.source_feedback) ? selected.metadata.source_feedback.filter(isRecord) : [];
+      const existing = draft.assertions.map((row) => row.assertion.trim()).filter(Boolean);
+      const sentences = await requestSuggestions(draft.prompt, text(selected.metadata.source_output), feedback, existing);
+      setDrafts((current) => {
+        if (!current[id]) return current;
+        const kept = current[id].assertions.filter((row) => row.assertion.trim() || row.name);
+        const added = sentences.map((assertion) => ({ key: keyId(), name: slugify(assertion), assertion }));
+        return { ...current, [id]: { ...current[id], assertions: [...kept, ...added] } };
+      });
+      setSuggestNotice({ kind: 'success', text: sentences.length
+        ? `Added ${sentences.length} suggested assertion${sentences.length === 1 ? '' : 's'} below. Edit or delete any that don't say what you mean.`
+        : 'No suggestions came back.' });
+    } catch (error) {
+      setSuggestNotice({ kind: 'error', text: `Could not suggest assertions: ${errorMessage(error)}` });
+    } finally {
+      setSuggesting(null);
+    }
+  };
+
+  const runImport = (picked?: string) => {
     const traceId = picked ?? traceIdFrom(importRef);
-    setImportingTrace(traceId ?? null);
     if (!traceId) {
       setImportStatus({ kind: 'error', text: 'Paste a trace URL or trace ID.' });
       return;
     }
-    setImporting('busy');
-    setImportStatus(null);
-    try {
-      const message = await importAsProposal(traceId);
-      setImportRef('');
-      setImporting('closed');
-      setImportStatus({ kind: 'success', text: message });
-    } catch (error) {
-      setImporting('open');
-      setImportStatus({ kind: 'error', text: errorMessage(error) });
-    } finally {
-      setImportingTrace(null);
-    }
+    void openPreview('past run', traceId);
   };
 
   const addExample = (from?: Draft) => {
@@ -519,10 +566,10 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
       </div>
       {inbox.map((run) => (
         <div key={run.runId} className="flex items-start gap-space-1 rounded-md border border-dashed border-default bg-surface-level-1 px-space-3 py-space-2">
-          <button type="button" className="flex min-w-0 flex-1 flex-col text-left" disabled={openingRun !== null} onClick={() => void openQueued(run)}>
+          <button type="button" className="flex min-w-0 flex-1 flex-col text-left" onClick={() => openQueued(run)}>
             <span className="flex items-center gap-space-1 text-sm">
               <span className="shrink-0 rounded-sm bg-brand-subtle px-space-1 text-xs text-primary">flagged</span>
-              <span className="truncate text-secondary">{openingRun === run.runId ? 'Importing…' : shortDate(run.start)}</span>
+              <span className="truncate text-secondary">{preview?.queueRunId === run.runId ? 'Previewing' : shortDate(run.start)}</span>
             </span>
             <span className="line-clamp-2 text-xs text-primary">{run.prompt || '(no prompt)'}</span>
             {run.turns ? <span className="text-xs text-tertiary">{run.turns} earlier turn{run.turns === 1 ? '' : 's'}</span> : null}
@@ -583,7 +630,7 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
         <div className="flex flex-col gap-space-2 rounded-md border border-default bg-surface-level-2 p-space-2">
           <div className="flex flex-col">
             <Text variant="sm" weight="semibold">Import a past run as a proposal</Text>
-            <Text variant="xs" color="tertiary">Its last message becomes When, the turns before it History, and its tool calls mocks.</Text>
+            <Text variant="xs" color="tertiary">Click one to read it first. Its last message becomes When, the turns before it History, and its tool calls mocks.</Text>
           </div>
           <input className={fieldClass} value={pastRunQuery} placeholder="Filter by prompt" aria-label="Filter past runs by prompt"
             onChange={(event) => setPastRunQuery(event.currentTarget.value)} />
@@ -600,11 +647,11 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
                 <div className="flex max-h-80 flex-col gap-space-1 overflow-y-auto">
                   {visible.length === 0 ? <Text variant="xs" color="tertiary">No importable runs{q ? ' match that filter' : ''}.</Text> : null}
                   {visible.map((run) => (
-                    <button key={run.traceId} type="button" disabled={importing === 'busy'} onClick={() => void runImport(run.traceId)}
-                      className="flex flex-col gap-px rounded-md border border-default bg-surface-level-1 px-space-2 py-space-1 text-left hover:border-focus disabled:opacity-60">
+                    <button key={run.traceId} type="button" onClick={() => runImport(run.traceId)}
+                      className={`flex flex-col gap-px rounded-md border bg-surface-level-1 px-space-2 py-space-1 text-left hover:border-focus ${preview?.traceId === run.traceId ? 'border-focus' : 'border-default'}`}>
                       <span className="line-clamp-2 text-xs text-primary">{run.prompt || '(no prompt)'}</span>
                       <span className="text-xs text-tertiary">
-                        {importingTrace === run.traceId ? 'Importing…' : [
+                        {preview?.traceId === run.traceId ? 'Previewing' : [
                           shortDate(run.start),
                           run.traceId in toolCallCounts ? `${toolCallCounts[run.traceId]} tool call${toolCallCounts[run.traceId] === 1 ? '' : 's'}` : '',
                         ].filter(Boolean).join(' · ')}
@@ -618,8 +665,8 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
           })() : null}
           <div className="flex gap-space-1 border-t border-default pt-space-2">
             <input className={`${fieldClass} min-w-0 flex-1`} value={importRef} placeholder="…or paste a trace link" aria-label="Trace URL or ID"
-              onChange={(event) => setImportRef(event.currentTarget.value)} onKeyDown={(event) => { if (event.key === 'Enter') void runImport(); }} />
-            <Button size="sm" variant="outlined" color="secondary" onClick={() => void runImport()} disabled={importing === 'busy' || !importRef.trim()}>Go</Button>
+              onChange={(event) => setImportRef(event.currentTarget.value)} onKeyDown={(event) => { if (event.key === 'Enter') runImport(); }} />
+            <Button size="sm" variant="outlined" color="secondary" onClick={() => runImport()} disabled={!importRef.trim()}>Preview</Button>
           </div>
         </div>
       ) : null}
@@ -637,7 +684,7 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
         
       </header>
 
-      <div className={`grid min-h-0 flex-1 gap-space-4 ${showResults && selected && !selected.isNew ? 'grid-cols-[260px_minmax(0,1fr)_360px]' : 'grid-cols-[260px_minmax(0,1fr)]'}`}>
+      <div className={`grid min-h-0 flex-1 gap-space-4 ${showResults && selected && !selected.isNew && !preview ? 'grid-cols-[260px_minmax(0,1fr)_360px]' : 'grid-cols-[260px_minmax(0,1fr)]'}`}>
         <aside className="flex min-h-0 flex-col gap-space-3 overflow-y-auto border-r border-default pr-space-4">{rail}</aside>
 
         <section className="flex min-h-0 min-w-0 flex-col gap-space-4 overflow-y-auto pr-space-1">
@@ -651,6 +698,9 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
               <Text variant="sm" color="error">Could not load tests: {loadError}</Text>
               <Button size="sm" variant="outlined" color="secondary" onClick={() => void load()}>Try again</Button>
             </Card>
+          ) : preview ? (
+            <TracePreview source={preview.source} trace={preview.trace} feedback={preview.feedback} error={preview.error} making={making}
+              onMake={makeProposal} onCancel={() => setPreview(null)} onRetry={() => void openPreview(preview.source, preview.traceId, preview.queueRunId)} />
           ) : !selected || !draft ? (
             <Card intent="neutral" className="border border-default text-center">
               <Text variant="md" color="secondary">No tests yet. Click New to add one.</Text>
@@ -797,16 +847,26 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
                         onOpen={() => setDrill(drill?.name === row.name ? null : { kind: 'assertion', name: row.name })} />
                       <RemoveButton label={`Remove assertion ${row.name}`} onClick={() => removeRow('assertions', row.key)} />
                     </div>
-                    <TextAreaField value={row.assertion} onChange={(assertion) => patchRow('assertions', row.key, { assertion })} rows={2} placeholder="e.g. It tells the customer what will happen next, and never promises something it can't do." />
+                    <TextAreaField value={row.assertion} onChange={(assertion) => patchRow('assertions', row.key, { assertion })} rows={2} placeholder="e.g. It tells the customer what will happen next." />
+                    {assertionHints(row.assertion).map((hint) => <span key={hint} className="text-xs text-tertiary">{hint}</span>)}
                     {drill?.kind === 'assertion' && drill.name === row.name && dataset ? (
-                      <AssertionDrilldown datasetId={dataset.id} exampleId={selected.id} testName={draft.name} name={row.name} kind="assertion" onClose={() => setDrill(null)} onAddMock={addMockForGap} />
+                      <AssertionDrilldown datasetId={dataset.id} exampleId={selected.id} testName={draft.name} name={row.name} kind="assertion" onClose={() => setDrill(null)} onAddMock={addMockForGap}
+                        onRewrite={(assertion) => patchRow('assertions', row.key, { assertion, name: row.name })} />
                     ) : null}
                   </div>
                 ))}
-                <div>
+                <div className="flex flex-wrap items-center gap-space-2">
                   <Button size="sm" variant="outlined" color="secondary" onClick={() => patchDraft({ assertions: [...draft.assertions, { key: keyId(), name: '', assertion: '' }] })}>
                     Add assertion
                   </Button>
+                  {/* Needs the server's judge model, so web mode only. */}
+                  {isProposal(selected) && isWeb() ? (
+                    <Button size="sm" variant="outlined" color="secondary" onClick={() => void suggestAssertions()} disabled={suggesting !== null}
+                      title="Drafts 2-4 assertions from the message, the original reply and the flag's comment">
+                      {suggesting === selected.id ? 'Suggesting…' : 'Suggest assertions'}
+                    </Button>
+                  ) : null}
+                  {suggestNotice ? <Text variant="xs" color={suggestNotice.kind === 'error' ? 'error' : 'tertiary'}>{suggestNotice.text}</Text> : null}
                 </div>
                 <Subsection title="Code checks" hint="Deterministic checks on the tool calls, with no judge. Each name becomes a feedback key (1 or 0), like an assertion."
                   addLabel="Add check" onAdd={() => patchDraft({ checks: [...draft.checks, emptyCheck()] })}>
@@ -840,7 +900,7 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
             </>
           )}
         </section>
-        {showResults && selected && !selected.isNew && dataset ? (
+        {showResults && selected && !selected.isNew && dataset && !preview ? (
           <ResultsPanel key={selected.id} datasetId={dataset.id} example={selected} workspaceId={metadata?.workspaceId} onClose={() => setShowResults(false)} />
         ) : null}
       </div>
