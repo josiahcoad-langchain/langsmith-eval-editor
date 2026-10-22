@@ -134,7 +134,7 @@ export function ResultsPanel({ datasetId, example, workspaceId, onClose }: { dat
                 <span className="flex items-center gap-space-1 text-xs text-tertiary"><Spinner size="sm" />{running} running</span>
               ) : graded.length ? (
                 <span className={`shrink-0 rounded-sm px-space-1 text-xs font-medium ${tone}`}>
-                  {holding}/{graded.length} passed{reps > 1 ? ' every run' : ''}
+                  {holding} of {graded.length} {graded.length === 1 ? 'check' : 'checks'} passed{reps > 1 ? ' every run' : ''}
                 </span>
               ) : null}
             </div>
@@ -144,7 +144,7 @@ export function ResultsPanel({ datasetId, example, workspaceId, onClose }: { dat
                   const tone = !row.scored ? 'text-tertiary' : row.passed === row.scored ? 'text-success-primary' : row.passed === 0 ? 'text-error-primary' : 'text-warning-primary';
                   return (
                     <li key={row.key} className="flex items-baseline gap-space-2 text-xs" title={row.comment || undefined}>
-                      <span className={`w-9 shrink-0 text-right font-medium ${tone}`}>{row.scored ? (reps > 1 ? `${row.passed}/${row.scored}` : row.passed ? '✓' : '✗') : '–'}</span>
+                      <span className={`w-9 shrink-0 text-right font-medium ${tone}`}>{row.scored ? (reps > 1 ? `${row.passed} of ${row.scored}` : row.passed ? '✓' : '✗') : '–'}</span>
                       <span className="font-mono text-primary">{row.key}</span>
                       {checkNames.has(row.key) ? <span className="rounded-sm border border-default px-space-1 text-tertiary">code check</span> : null}
                       {row.scored && row.passed > 0 && row.passed < row.scored ? <span className="text-warning-primary">flaky</span> : null}
@@ -163,7 +163,7 @@ export function ResultsPanel({ datasetId, example, workspaceId, onClose }: { dat
                     <div className="flex flex-wrap items-baseline gap-x-space-2 text-xs">
                       <span className="text-secondary">Repetition {index + 1}</span>
                       <span className="text-tertiary">
-                        {isRunning ? 'running' : result.error ? 'error' : `${passed}/${scored.length} passed${result.end ? ` · ${duration(result.start, result.end)}` : ''}`}
+                        {isRunning ? 'running' : result.error ? 'error' : `${passed} of ${scored.length} ${scored.length === 1 ? 'check' : 'checks'} passed${result.end ? ` · ${duration(result.start, result.end)}` : ''}`}
                       </span>
                       {result.answer ? (
                         <button type="button" className="text-secondary underline hover:text-primary" onClick={() => setOpenAnswer(openAnswer === result.runId ? null : result.runId)}>

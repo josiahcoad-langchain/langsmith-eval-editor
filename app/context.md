@@ -54,6 +54,17 @@ A Given / When / Assert test editor for an agent, over one LangSmith dataset (de
 
 - **Proposals live in the eval dataset**, flagged by `metadata.status`, not in a separate staging dataset, so a proposal's run history carries over when it's accepted. Accept PATCHes only `metadata`. The inbox is the annotation queue's runs minus those some example already names in `source_run_id`; the queue item is removed on Accept or Delete, not on import, so a half-shaped proposal stays queued. `promptAndHistory` (data.ts) reads a root run's messages in LangChain, OpenAI or serialized-`lc` shape.
 
+- Written for a subject-matter expert, not an engineer (from an SME review, 2026-10-22):
+  - A run that called an unmocked tool shows "This run hit a gap in the test, not a problem with the agent" in the
+    drill-down (`mockGaps`, `AssertionDrilldown`), with "Add this mock", and hides "Judge right?" on those repetitions.
+  - Proposals keep the original reply and the flagging feedback (`metadata.source_output`, `source_feedback`) and
+    show them in `SourcePanel`. Accept is "as passing" or "as known bug" (`metadata.xfail` = reason; the CLI then
+    expects a failure and reports XPASSED once it passes). Tests with `xfail` show a "Known bug" bar with a clear button.
+  - Assertion and check names are generated (`slugify`, `autoCheckName`) until the expert types one, so a new
+    assertion or check never blocks saving. Check types show plain-English labels (`CHECK_LABELS`).
+  - Results say "2 of 3 checks" and chips say "2/3 runs"; mock rows preview values; turns are counted as user turns
+    everywhere; runs from before content hashes say "can't tell whether this result is current".
+
 ## Gotchas
 
 - **1 MB custom-app bundle limit**; the bundle is ~910 KB. `postcss.config.js` drops non-Latin font subsets. Don't add Macaw's DropdownMenu back (~90 KB).

@@ -25,7 +25,12 @@ function responseSummary(response: string): { fails: boolean; text: string } {
     return { fails: false, text: `sequence of ${parsed.sequence.length} responses, last repeats${fails ? ` · ${fails} fail` : ''} · ${size}` };
   }
   if (Array.isArray(parsed)) return { fails: false, text: `${parsed.length} items · ${size}` };
-  if (isRecord(parsed)) return { fails: false, text: `fields: ${list(Object.keys(parsed))} · ${size}` };
+  // Values, not just field names: "status: in_transit · carrier: UPS" says what the tool answers.
+  if (isRecord(parsed)) {
+    const entries = Object.entries(parsed);
+    const shown = entries.slice(0, 3).map(([k, v]) => `${k}: ${v !== null && typeof v === 'object' ? (Array.isArray(v) ? `${v.length} items` : '{…}') : String(v).slice(0, 24)}`);
+    return { fails: false, text: `${shown.join(' · ')}${entries.length > 3 ? ` +${entries.length - 3} more` : ''}` };
+  }
   const textValue = String(parsed);
   return { fails: false, text: `"${textValue.length > 60 ? `${textValue.slice(0, 60)}…` : textValue}"` };
 }

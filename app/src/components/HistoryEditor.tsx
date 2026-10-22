@@ -41,7 +41,11 @@ export function HistoryEditor({ history, onChange }: { history: HistoryTurn[]; o
     [next[index], next[index + by]] = [next[index + by], next[index]];
     onChange(next);
   };
-  const summary = history.length ? `${history.length} turn${history.length === 1 ? '' : 's'} · ${sizeLabel(historyChars(history))}` : 'No earlier turns';
+  // Counted as the user's turns, like the proposal cards; the message count (tool calls and results included) follows.
+  const userTurns = history.filter((turn) => turn.role === 'user').length;
+  const summary = history.length
+    ? `${userTurns} earlier turn${userTurns === 1 ? '' : 's'} (${history.length} message${history.length === 1 ? '' : 's'}) · ${sizeLabel(historyChars(history))}`
+    : 'No earlier turns';
   return (
     <div className="flex flex-col gap-space-2 rounded-md border border-default bg-surface-level-1 p-space-3">
       <div className="flex items-center justify-between gap-space-2">

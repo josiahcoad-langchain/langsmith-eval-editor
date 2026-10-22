@@ -14,11 +14,12 @@ import { HistoryEditor } from './components/HistoryEditor';
 import { FilesEditor } from './components/FilesEditor';
 import { MockToolEditor } from './components/MockToolEditor';
 import { ResultsPanel } from './components/ResultsPanel';
+import { SourcePanel } from './components/SourcePanel';
 import {
-  acceptProposal, contextProblem, countToolCalls, deleteExample, emptyCheck, emptyExample, errorMessage, fetchAllExamples, fetchDataset, fetchPastRuns,
-  fetchProposalQueue, fetchQueuedRuns, fetchResults, fetchStatuses, importTrace, isDirty, isProposal, keyId, proposalExample, removeFromQueue,
-  saveExampleTo, shortDate, staleness, testFiles, text, toDraft, toPayload, traceIdFrom, withFiles,
-  type Dataset, type Draft, type Example, type PastRun, type QueuedRun, type TestStatus, type TestSummary,
+  acceptProposal, autoCheckName, contextProblem, countToolCalls, deleteExample, emptyCheck, emptyExample, errorMessage, fetchAllExamples, fetchDataset, fetchPastRuns,
+  fetchProposalQueue, fetchQueuedRuns, fetchResults, fetchRunFeedback, fetchStatuses, importTrace, isDirty, isProposal, keyId, proposalExample, removeFromQueue,
+  saveExampleTo, setKnownBug, shortDate, slugify, staleness, testFiles, text, toDraft, toPayload, traceIdFrom, withFiles,
+  type Dataset, type Draft, type Example, type MockGap, type PastRun, type QueuedRun, type TestStatus, type TestSummary,
 } from './lib/data';
 import { fetchActiveRuns, isWeb, requestRun, requestRuns } from './runs';
 
@@ -90,6 +91,8 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  // Accepting a proposal as a known bug asks for the reason first (null: not asking).
+  const [knownBugReason, setKnownBugReason] = useState<string | null>(null);
   const [notice, setNotice] = useState<Notice>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const savingIds = useRef(new Set<string>());
@@ -227,8 +230,37 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
 
   function patchRow<K extends 'mockTools' | 'assertions' | 'checks'>(field: K, key: string, patch: Partial<Draft[K][number]>) {
     if (!draft) return;
-    patchDraft({ [field]: (draft[field] as { key: string }[]).map((row) => (row.key === key ? { ...row, ...patch } : row)) } as Partial<Draft>);
+    patchDraft({ [field]: (draft[field] as { key: string }[]).map((row) => (row.key === key ? withAutoName(field, row, { ...row, ...patch }, patch) : row)) } as Partial<Draft>);
   }
+
+  // An assertion or check that still has its generated name (or none) is renamed as it's written, so nobody has to
+  // invent a feedback key before they can save. A name the expert typed is never touched.
+  function withAutoName(field: string, before: object, after: object, patch: object) {
+    if ('name' in patch) return after;
+    if (field === 'assertions') {
+      const [b, a] = [before as Draft['assertions'][number], after as Draft['assertions'][number]];
+      return !b.name || b.name === slugify(b.assertion) ? { ...a, name: slugify(a.assertion) } : a;
+    }
+    if (field === 'checks') {
+      const [b, a] = [before as Draft['checks'][number], after as Draft['checks'][number]];
+      return !b.name || b.name === autoCheckName(b) || b.name === b.type.replace(/_/g, '-') ? { ...a, name: autoCheckName(a) } : a;
+    }
+    return after;
+  }
+
+  // "Add this mock" from a run that hit a gap: a mock for the tool, or a case for these arguments on an existing one.
+  const addMockForGap = (gap: MockGap) => {
+    if (!draft) return;
+    const when = Object.keys(gap.args).length ? JSON.stringify(gap.args) : '';
+    const existing = draft.mockTools.find((mock) => mock.tool === gap.tool);
+    if (!existing) {
+      patchDraft({ mockTools: [...draft.mockTools, { key: keyId(), tool: gap.tool, response: '', cases: when ? [{ key: keyId(), when, response: '' }] : null }] });
+    } else {
+      const cases = existing.cases ?? [{ key: keyId(), when: '', response: existing.response }];
+      patchRow('mockTools', existing.key, { cases: [{ key: keyId(), when, response: '' }, ...cases], response: '' });
+    }
+    setNotice({ kind: 'success', text: `Added a mock for ${gap.tool} under Given. Fill in what it returns, then run again.` });
+  };
 
   function removeRow(field: 'mockTools' | 'assertions' | 'checks', key: string) {
     if (!draft) return;
@@ -251,8 +283,10 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
 
   // A trace becomes a proposal, not a test: it joins the eval set only once the expert accepts it.
   const importAsProposal = async (traceId: string, queueRunId?: string) => {
-    const { draft: imported, recordedOn, toolCalls } = await importTrace(traceId, tools);
-    const example = proposalExample(imported.prompt, recordedOn, traceId, queueRunId);
+    const { draft: imported, recordedOn, toolCalls, sourceOutput, rootRunId } = await importTrace(traceId, tools);
+    // The feedback that flagged it (a thumbs-down and its comment) sits on the queued run, or on the trace's root run.
+    const feedback = await fetchRunFeedback(queueRunId || rootRunId).catch(() => []);
+    const example = proposalExample(imported.prompt, recordedOn, traceId, queueRunId, { output: sourceOutput, feedback });
     setExamples((current) => [...current, example]);
     setDrafts((current) => ({ ...current, [example.id]: imported }));
     select(example.id);
@@ -384,18 +418,21 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
     }
   };
 
-  const accept = async () => {
+  const accept = async (knownBug?: string) => {
     if (!selected || selected.isNew || dirty) return;
     setSaving(true);
     try {
-      const accepted = await acceptProposal(selected);
+      const accepted = await acceptProposal(selected, knownBug);
+      setKnownBugReason(null);
       setExamples((current) => current.map((row) => (row.id === accepted.id ? accepted : row)));
       const queueRun = text(selected.metadata.source_run_id);
       if (queueId && queueRun) {
         await removeFromQueue(queueId, queueRun).catch(() => undefined);
         setQueued((current) => current.filter((row) => row.runId !== queueRun));
       }
-      setNotice({ kind: 'success', text: 'Accepted: it is part of the eval set now.' });
+      setNotice({ kind: 'success', text: knownBug
+        ? 'Accepted as a known bug: it is expected to fail until the agent is fixed, and the CLI flags it once it passes.'
+        : 'Accepted: it is part of the eval set now.' });
     } catch (error) {
       setNotice({ kind: 'error', text: `Accept failed: ${errorMessage(error)}` });
     } finally {
@@ -660,13 +697,44 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
                   <div className="flex min-w-0 flex-col">
                     <Text variant="sm" weight="semibold">Proposal · not in the eval set yet</Text>
                     <Text variant="xs" color="secondary">
-                      Write assertions and fill in missing mocks, then run it. Accept once every assertion passes on every repetition; until then Run all and the CLI skip it.
+                      Write assertions for what the agent should have done, fill in any missing mocks, and run it until the grades agree.
+                      A flagged trace is usually a known bug: accept it as one to keep it in the set, expected to fail until the agent is fixed.
+                      Until you accept it, Run all and the CLI skip it.
                     </Text>
                   </div>
-                  <Button size="sm" color="primary" onClick={() => void accept()} disabled={selected.isNew || dirty || saving}
-                    title={selected.isNew || dirty ? 'Save the proposal first' : undefined}>
-                    Accept into eval set
-                  </Button>
+                  <div className="flex flex-wrap items-center gap-space-2">
+                    {knownBugReason === null ? (
+                      <>
+                        <Button size="sm" variant="outlined" color="secondary" onClick={() => setKnownBugReason('')} disabled={selected.isNew || dirty || saving}
+                          title={selected.isNew || dirty ? 'Save the proposal first' : 'It fails today and should, until the agent is fixed'}>
+                          Accept as known bug
+                        </Button>
+                        <Button size="sm" color="primary" onClick={() => void accept()} disabled={selected.isNew || dirty || saving}
+                          title={selected.isNew || dirty ? 'Save the proposal first' : 'It passes today and must keep passing'}>
+                          Accept as passing
+                        </Button>
+                      </>
+                    ) : (
+                      <>
+                        <input className={`${fieldClass} w-72`} autoFocus value={knownBugReason} placeholder="What's wrong today, e.g. promises refunds over $200"
+                          aria-label="Known bug reason" onChange={(event) => setKnownBugReason(event.currentTarget.value)}
+                          onKeyDown={(event) => { if (event.key === 'Enter' && knownBugReason.trim()) void accept(knownBugReason.trim()); }} />
+                        <Button size="sm" color="primary" onClick={() => void accept(knownBugReason.trim())} disabled={!knownBugReason.trim() || saving}>Accept</Button>
+                        <Button size="sm" variant="outlined" color="secondary" onClick={() => setKnownBugReason(null)}>Cancel</Button>
+                      </>
+                    )}
+                  </div>
+                </div>
+              ) : null}
+              {isProposal(selected) ? <SourcePanel example={selected} /> : null}
+              {!isProposal(selected) && text(selected.metadata.xfail) ? (
+                <div className="flex flex-wrap items-center justify-between gap-space-2 rounded-md border border-warning bg-warning-subtle p-space-2 text-xs">
+                  <span className="text-primary"><span className="font-semibold">Known bug:</span> {text(selected.metadata.xfail)}. Expected to fail until the agent is fixed; the CLI flags it once it passes.</span>
+                  <button type="button" className="text-secondary underline hover:text-primary" disabled={saving}
+                    onClick={() => void setKnownBug(selected, null).then((updated) => setExamples((current) => current.map((row) => (row.id === updated.id ? updated : row))))
+                      .catch((error) => setNotice({ kind: 'error', text: errorMessage(error) }))}>
+                    It's fixed: clear the mark
+                  </button>
                 </div>
               ) : null}
 
@@ -682,13 +750,14 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
               <Section title="Given (environment)" hint="The world the agent runs in, before the prompt arrives."
                 summary={[
                   `${draft.mockTools.length} mock tool${draft.mockTools.length === 1 ? '' : 's'}`,
-                  draft.history.length ? `${draft.history.length} earlier turn${draft.history.length === 1 ? '' : 's'}` : '',
+                  // Counted as the user's turns, the same way the proposal cards count them.
+                  draft.history.some((t) => t.role === 'user') ? `${draft.history.filter((t) => t.role === 'user').length} earlier turn${draft.history.filter((t) => t.role === 'user').length === 1 ? '' : 's'}` : '',
                   draft.context.trim() ? 'context' : '',
                   testFiles(selected).length ? `${testFiles(selected).length} file${testFiles(selected).length === 1 ? '' : 's'}` : '',
                 ].filter(Boolean).join(' · ')}>
                 <div className="flex flex-col gap-space-1">
                   <TextAreaField label="Context (JSON object passed to the agent hook; empty = none)" value={draft.context} onChange={(context) => patchDraft({ context })}
-                    rows={draft.context ? Math.min(12, draft.context.split('\n').length + 1) : 2} mono placeholder='{"now": "2026-10-03T09:00:00Z", "flags": {"beta": true}}' />
+                    rows={draft.context ? Math.min(12, draft.context.split('\n').length + 1) : 2} mono placeholder='Leave empty unless the agent needs setup. e.g. {"customer_tier": "gold"}' />
                   {contextProblem(draft.context) ? <span className="text-xs text-error-primary">{contextProblem(draft.context)}</span> : null}
                 </div>
                 {!selected.isNew ? (
@@ -722,15 +791,15 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
                 {draft.assertions.map((row) => (
                   <div key={row.key} className="flex flex-col gap-space-2 rounded-md border border-default bg-surface-level-1 p-space-3">
                     <div className="flex items-center gap-space-2">
-                      <div className="w-64"><TextField value={row.name} onChange={(name) => patchRow('assertions', row.key, { name: name.toLowerCase().replace(/[\s_]+/g, '-') })} placeholder="assertion-name" mono /></div>
+                      <div className="w-64"><TextField value={row.name} onChange={(name) => patchRow('assertions', row.key, { name: name.toLowerCase().replace(/[\s_]+/g, '-') })} placeholder="named from the sentence" mono /></div>
                       <div className="flex-1" />
                       <ResultChip result={summaries[selected.id]?.keys[row.name]} ranAt={summaries[selected.id]?.ranAt ?? ''} stale={selectedStale}
                         onOpen={() => setDrill(drill?.name === row.name ? null : { kind: 'assertion', name: row.name })} />
                       <RemoveButton label={`Remove assertion ${row.name}`} onClick={() => removeRow('assertions', row.key)} />
                     </div>
-                    <TextAreaField value={row.assertion} onChange={(assertion) => patchRow('assertions', row.key, { assertion })} rows={2} placeholder="It tells the customer the refund could not be processed right now." />
+                    <TextAreaField value={row.assertion} onChange={(assertion) => patchRow('assertions', row.key, { assertion })} rows={2} placeholder="e.g. It tells the customer what will happen next, and never promises something it can't do." />
                     {drill?.kind === 'assertion' && drill.name === row.name && dataset ? (
-                      <AssertionDrilldown datasetId={dataset.id} exampleId={selected.id} testName={draft.name} name={row.name} kind="assertion" onClose={() => setDrill(null)} />
+                      <AssertionDrilldown datasetId={dataset.id} exampleId={selected.id} testName={draft.name} name={row.name} kind="assertion" onClose={() => setDrill(null)} onAddMock={addMockForGap} />
                     ) : null}
                   </div>
                 ))}
@@ -748,7 +817,7 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
                         onOpen={() => setDrill(drill?.name === check.name ? null : { kind: 'check', name: check.name })} />} />
                   ))}
                   {drill?.kind === 'check' && dataset && draft.checks.some((c) => c.name === drill.name) ? (
-                    <AssertionDrilldown datasetId={dataset.id} exampleId={selected.id} testName={draft.name} name={drill.name} kind="check" onClose={() => setDrill(null)} />
+                    <AssertionDrilldown datasetId={dataset.id} exampleId={selected.id} testName={draft.name} name={drill.name} kind="check" onClose={() => setDrill(null)} onAddMock={addMockForGap} />
                   ) : null}
 
                 </Subsection>
