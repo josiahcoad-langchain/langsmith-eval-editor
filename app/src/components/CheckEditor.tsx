@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react';
 import { RemoveButton, TextAreaField, TextField, fieldClass } from './fields';
-import { CHECK_TYPES, checkProblem, type Check } from '../lib/data';
+import { CHECK_LABELS, CHECK_TYPES, checkProblem, type Check } from '../lib/data';
 
 const selectClass = `${fieldClass} font-mono`;
 const HINTS: Record<string, string> = {
@@ -12,6 +12,7 @@ const HINTS: Record<string, string> = {
   must_call_with_values: 'The tool must be called with arguments that include these values.',
   max_prompt_tokens: 'No single model call may have a prompt longer than this.',
   max_model_calls: 'At most this many model calls in total.',
+  must_output_file: 'The agent must make a file. Fields: {"mime": "image/"} and/or {"name_contains": "report"}; {} = any file.',
   custom: "Any fields; handled by the agent's hook.",
 };
 
@@ -68,7 +69,7 @@ export function CheckEditor({ check, tools, onChange, onRemove, result }: {
         <select className={`${selectClass} w-56`} aria-label="Check type" value={check.type}
           // Params belong to a type, so switching drops the old type's JSON; the name stays.
           onChange={(event) => onChange({ type: event.currentTarget.value, extra: {}, json: '' })}>
-          {CHECK_TYPES.map((type) => <option key={type} value={type}>{type}</option>)}
+          {CHECK_TYPES.map((type) => <option key={type} value={type}>{CHECK_LABELS[type] ?? type}</option>)}
           {!(CHECK_TYPES as readonly string[]).includes(check.type) ? <option value={check.type}>{check.type}</option> : null}
         </select>
         <div className="flex-1" />
@@ -100,10 +101,10 @@ export function CheckEditor({ check, tools, onChange, onRemove, result }: {
           <TextAreaField label="Args (JSON object)" value={check.json} onChange={(json) => onChange({ json })} rows={3} mono placeholder='{"order_id": "A1001"}' />
         </div>
       ) : null}
-      {!(check.type in HINTS) || check.type === 'custom' ? (
+      {!(check.type in HINTS) || check.type === 'custom' || check.type === 'must_output_file' ? (
         <TextAreaField label="Fields (JSON object, without name and type)" value={check.json} onChange={(json) => onChange({ json })} rows={4} mono placeholder='{"threshold": 3}' />
       ) : null}
-      {problem && check.name ? <span className="text-xs text-error-primary">{problem}</span> : null}
+      {problem ? <span className="text-xs text-error-primary">{problem}</span> : null}
     </div>
   );
 }

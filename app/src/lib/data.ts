@@ -149,7 +149,25 @@ export function parseResponse(response: string): unknown {
 
 // --- Code checks ---------------------------------------------------------------------------------------------
 
-export const CHECK_TYPES = ['must_call', 'must_not_call', 'max_tool_calls', 'max_tool_rounds', 'must_call_before', 'must_call_with_values', 'max_prompt_tokens', 'max_model_calls', 'custom'] as const;
+export const CHECK_TYPES = ['must_call', 'must_not_call', 'max_tool_calls', 'max_tool_rounds', 'must_call_before', 'must_call_with_values', 'max_prompt_tokens', 'max_model_calls', 'must_output_file', 'custom'] as const;
+// What each type means, in the words an expert would use. The id stays visible as the saved value.
+export const CHECK_LABELS: Record<string, string> = {
+  must_call: 'Must use tool…', must_not_call: 'Must never use tool…', max_tool_calls: 'Uses tools at most N times',
+  max_tool_rounds: 'At most N rounds of tool calls', must_call_before: 'Uses one tool before another',
+  must_call_with_values: 'Uses a tool with specific values', max_prompt_tokens: 'Keeps each prompt under N tokens',
+  max_model_calls: 'At most N model calls', must_output_file: 'Must make a file', custom: 'Custom (agent hook)',
+};
+
+// A readable default name for an assertion: its first few words, as a feedback key.
+export function slugify(sentence: string, words = 5) {
+  return sentence.toLowerCase().replace(/[^a-z0-9\s-]/g, ' ').split(/\s+/).filter(Boolean).slice(0, words).join('-').slice(0, 48);
+}
+
+// A default name for a code check, from its type and the tool it's about, so a new check never blocks saving.
+export function autoCheckName(check: Pick<Check, 'type' | 'tool' | 'groups' | 'first' | 'second'>) {
+  const tool = check.tool || check.groups.flat().find(Boolean) || check.second || '';
+  return [check.type, tool].filter(Boolean).join('-').replace(/_/g, '-');
+}
 // Keys each type owns; anything else on a saved check rides along in `extra`.
 const CHECK_KEYS: Record<string, string[]> = {
   must_call: ['tools'], must_not_call: ['tools'], max_tool_calls: ['max', 'tool'], max_tool_rounds: ['max'],
@@ -157,7 +175,7 @@ const CHECK_KEYS: Record<string, string[]> = {
 };
 
 export function emptyCheck(type = 'must_call'): Check {
-  return { key: keyId(), name: '', type, max: '', tool: '', first: '', second: '', groups: [], json: '', extra: {} };
+  return { key: keyId(), name: type.replace(/_/g, '-'), type, max: '', tool: '', first: '', second: '', groups: [], json: '', extra: {} };
 }
 
 function toCheck(row: Json): Check {
@@ -800,7 +818,43 @@ export async function importTrace(traceId: string, agentTools: string[]) {
     checks: [],
     splits: ['base'],
   };
-  return { draft, recordedOn: started, toolCalls: toolRuns.length, rootRunId: text(root.id) };
+  return { draft, recordedOn: started, toolCalls: toolRuns.length, rootRunId: text(root.id), sourceOutput: finalReply(root.outputs) };
+}
+
+// The agent's last reply in a traced run's outputs, whichever shape the tracer stored it in.
+function finalReply(outputs: unknown): string {
+  if (!isRecord(outputs)) return '';
+  const messages = Array.isArray(outputs.messages) ? outputs.messages.filter(isRecord).map(tracedMessage) : [];
+  const last = [...messages].reverse().find((m) => m.role === 'assistant' && m.content.trim());
+  if (last) return last.content.slice(0, 6000);
+  return typeof outputs.output === 'string' ? outputs.output.slice(0, 6000) : '';
+}
+
+export type SourceFeedback = { key: string; score: number | null; comment: string };
+
+// Feedback on the run a proposal came from: usually the thumbs-down and its comment that flagged it.
+export async function fetchRunFeedback(runId: string): Promise<SourceFeedback[]> {
+  const rows = await callLangSmith<unknown>('GET /api/v1/feedback', { params: { run: runId, limit: '20' } });
+  return (Array.isArray(rows) ? rows : []).filter(isRecord).map((row) => ({
+    key: text(row.key), score: typeof row.score === 'number' ? row.score : null, comment: text(row.comment),
+  }));
+}
+
+// --- Gaps in a test ------------------------------------------------------------------------------------------
+
+export type MockGap = { tool: string; args: Json };
+
+// Tool calls in a run that no mock answered. The agent got an error back that the test never wrote, so the run says
+// nothing about the agent: the test needs a mock (or a case) for each of these.
+export function mockGaps(run: Pick<TestResult, 'toolCalls' | 'error' | 'assertions'>): MockGap[] {
+  const gaps = run.toolCalls
+    .filter((call) => /is not mocked in this test/.test(text(call.error)))
+    .map((call) => ({ tool: text(call.name), args: isRecord(call.args) ? call.args : {} }));
+  // An errored run records no tool calls; its error names the tools ("Test incomplete: no mock answered a, b").
+  const named = /no mock answered ([\w, ]+)/.exec(run.error)?.[1].split(',').map((t) => t.trim()).filter(Boolean) ?? [];
+  for (const tool of named) if (!gaps.some((gap) => gap.tool === tool)) gaps.push({ tool, args: {} });
+  const seen = new Set<string>();
+  return gaps.filter((gap) => { const k = `${gap.tool}:${stableStringify(gap.args)}`; return !seen.has(k) && seen.add(k); });
 }
 
 // --- Formatting ----------------------------------------------------------------------------------------------
@@ -874,18 +928,34 @@ export async function removeFromQueue(queueId: string, runId: string) {
 }
 
 // A new, unsaved proposal from an imported trace; autosave creates the example once it's valid.
-export function proposalExample(prompt: string, recordedOn: string, traceId: string, runId?: string): Example {
+// `source` is what went wrong in the original run (its reply and the feedback that flagged it), kept so the expert
+// can see it while writing assertions.
+export function proposalExample(prompt: string, recordedOn: string, traceId: string, runId?: string,
+  source?: { output: string; feedback: SourceFeedback[] }): Example {
   const example = emptyExample();
   return {
     ...example,
     inputs: { prompt, recorded_on: recordedOn },
-    metadata: { ...example.metadata, status: 'proposal', source_trace_id: traceId, ...(runId ? { source_run_id: runId } : {}) },
+    metadata: {
+      ...example.metadata, status: 'proposal', source_trace_id: traceId, ...(runId ? { source_run_id: runId } : {}),
+      ...(source?.output ? { source_output: source.output } : {}), ...(source?.feedback.length ? { source_feedback: source.feedback } : {}),
+    },
   };
 }
 
-// Accept: the proposal becomes a test. Only metadata changes, so its results stay current.
-export async function acceptProposal(example: Example): Promise<Example> {
-  const metadata = { ...example.metadata, status: 'active' };
+// Accept: the proposal becomes a test. Only metadata changes, so its results stay current. A flagged trace is
+// usually a known bug: `knownBug` (the reason) marks it xfail, so it's expected to fail until the agent is fixed and
+// the CLI reports it XPASSED, failing the suite, once it starts passing (server/suite.py).
+export async function acceptProposal(example: Example, knownBug?: string): Promise<Example> {
+  const metadata = { ...example.metadata, status: 'active', ...(knownBug ? { xfail: knownBug } : {}) };
+  await callLangSmith(`PATCH /api/v1/examples/${example.id}`, { body: { metadata } });
+  return { ...example, metadata };
+}
+
+// Marks a test as a known bug (reason) or clears the mark (null).
+export async function setKnownBug(example: Example, reason: string | null): Promise<Example> {
+  const { xfail: _old, ...rest } = example.metadata;
+  const metadata = reason ? { ...rest, xfail: reason } : rest;
   await callLangSmith(`PATCH /api/v1/examples/${example.id}`, { body: { metadata } });
   return { ...example, metadata };
 }

@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Button } from '@langchain/macaw-components/Button';
 import { Spinner } from '@langchain/macaw-components/Spinner';
-import { errorMessage, fetchLabels, fetchReasons, fetchResults, openTrace, saveLabel, shortDate, text, type Json, type Label, type TestResult } from '../lib/data';
+import { errorMessage, fetchLabels, fetchReasons, fetchResults, mockGaps, openTrace, saveLabel, shortDate, text, type Json, type Label, type MockGap, type TestResult } from '../lib/data';
 import { isWeb, requestRegrade, type Regrade } from '../runs';
 import { Markdown } from './Markdown';
 
@@ -18,8 +18,9 @@ const CAUSE: Record<Regrade['cause'], { label: string; tone: string }> = {
   consistent_pass: { label: 'Passes every time, by every judge', tone: 'text-success-primary' },
 };
 
-export function AssertionDrilldown({ datasetId, exampleId, testName, name, kind, onClose }: {
+export function AssertionDrilldown({ datasetId, exampleId, testName, name, kind, onClose, onAddMock }: {
   datasetId: string; exampleId: string; testName: string; name: string; kind: 'assertion' | 'check'; onClose: () => void;
+  onAddMock?: (gap: MockGap) => void;
 }) {
   const [runs, setRuns] = useState<TestResult[] | null>(null);
   const [reasons, setReasons] = useState<Record<string, string>>({});
@@ -69,6 +70,7 @@ export function AssertionDrilldown({ datasetId, exampleId, testName, name, kind,
       </div>
 
       {loadError ? <span className="text-error-primary">{loadError}</span> : null}
+      {runs ? <GapBanner gaps={dedupe(runs.flatMap(mockGaps))} onAddMock={onAddMock} /> : null}
       {!runs && !loadError ? <Spinner size="sm" /> : null}
       {runs?.map((run, index) => {
         const grade = run.assertions.find((a) => a.key === name);
@@ -93,7 +95,7 @@ export function AssertionDrilldown({ datasetId, exampleId, testName, name, kind,
                 <div className="border-l-2 border-secondary pl-3"><Markdown source={run.answer} /></div>
               </div>
             ) : null}
-            {kind === 'assertion' && grade && grade.score !== null && !run.error ? (
+            {kind === 'assertion' && grade && grade.score !== null && !run.error && !mockGaps(run).length ? (
               <JudgeLabel judgedPass={grade.score === 1} label={labels[run.runId]}
                 onLabel={async (judgeRight) => {
                   // The label is the RIGHT verdict: the judge's when it was right, the opposite when it wasn't.
@@ -196,6 +198,35 @@ function RegradeResult({ result }: { result: Regrade }) {
         </tbody>
       </table>
       <span className="text-tertiary">Hover a judge's grades for its reason on that repetition.</span>
+    </div>
+  );
+}
+
+function dedupe(gaps: MockGap[]) {
+  const seen = new Set<string>();
+  return gaps.filter((gap) => { const k = `${gap.tool}:${JSON.stringify(gap.args)}`; return !seen.has(k) && seen.add(k); });
+}
+
+// A run that called a tool the test doesn't mock graded the test, not the agent: the agent was answering an error
+// the test never wrote. Said first and plainly, so nobody "fixes" an agent that behaved correctly.
+function GapBanner({ gaps, onAddMock }: { gaps: MockGap[]; onAddMock?: (gap: MockGap) => void }) {
+  if (!gaps.length) return null;
+  return (
+    <div className="flex flex-col gap-space-1 rounded-sm border border-warning bg-warning-subtle p-space-2">
+      <span className="text-sm font-semibold text-primary">This run hit a gap in the test, not a problem with the agent</span>
+      <span className="text-secondary">
+        The agent called a tool the test has no mock for, so it got an error back. Its grades below don't say anything about the agent. Add the missing mock, then run again.
+      </span>
+      {gaps.map((gap, index) => (
+        <span key={index} className="flex flex-wrap items-center gap-space-2">
+          <span className="font-mono text-primary">{gap.tool}({clip(Object.entries(gap.args).map(([k, v]) => `${k}=${typeof v === 'string' ? v : JSON.stringify(v)}`).join(', '), 120)})</span>
+          {onAddMock ? (
+            <button type="button" className="rounded-sm border border-default bg-surface-level-1 px-space-2 text-primary hover:border-focus" onClick={() => onAddMock(gap)}>
+              Add this mock
+            </button>
+          ) : null}
+        </span>
+      ))}
     </div>
   );
 }

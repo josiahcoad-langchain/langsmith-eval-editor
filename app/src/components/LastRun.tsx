@@ -34,6 +34,9 @@ export function LastRun({ summary, stale, error = '', onOpen, onRun }: {
       </span>
       {summary.status === 'error' && error ? <span className="text-error-primary">Why: {error}</span> : null}
       {elsewhere}
+      {!stale && !summary.testHash ? (
+        <span className="text-tertiary">Can't tell whether this result is current: the run predates change tracking. Run it again to be sure.</span>
+      ) : null}
       {stale ? <span className="text-warning-primary">Out of date: {stale}. {run('Run it again') ?? 'Run it again'} to refresh.</span> : null}
     </span>
   );
