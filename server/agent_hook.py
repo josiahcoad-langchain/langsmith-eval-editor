@@ -8,7 +8,9 @@ project keep its hook in its own repo and run this harness from its own environm
 A hook defines `TOOL_NAMES` and `run_agent(prompt, mocks, history=None, context=None)`, and may define
 `custom_check(outputs, check) -> (passed, reason)` for checks of type `custom`, and either
 `judge_model()` (the chat model that grades assertions; default JUDGE_MODEL) or
-`grade_assertions(assertions, evidence) -> [Grade]` to replace assertion grading entirely.
+`grade_assertions(assertions, evidence) -> [Grade]` to replace assertion grading entirely. It may also define
+`agent_context() -> {"instructions": str, "tools": [{"name", "description"}]}`, which Suggest assertions uses when a
+test has no trace to read the agent's system prompt and tools from.
 """
 
 from __future__ import annotations

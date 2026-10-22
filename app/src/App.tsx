@@ -18,9 +18,9 @@ import { SourcePanel } from './components/SourcePanel';
 import { TracePreview } from './components/TracePreview';
 import {
   acceptProposal, assertionHints, autoCheckName, contextProblem, countToolCalls, deleteExample, emptyCheck, emptyExample, errorMessage, fetchAllExamples, fetchDataset, fetchPastRuns, fetchTrace, isRecord,
-  fetchProposalQueue, fetchQueuedRuns, fetchResults, fetchRunFeedback, fetchStatuses, importTrace, isDirty, isProposal, keyId, proposalExample, removeFromQueue,
+  fetchProposalQueue, fetchQueuedRuns, fetchResults, fetchStatuses, fetchTraceFeedback, importTrace, isDirty, isProposal, keyId, proposalExample, removeFromQueue,
   saveExampleTo, setKnownBug, shortDate, slugify, staleness, testFiles, text, toDraft, toPayload, traceIdFrom, withFiles,
-  type Dataset, type Draft, type Example, type MockGap, type PastRun, type QueuedRun, type SourceFeedback, type TestStatus, type TestSummary, type Trace,
+  type Dataset, type Draft, type Example, type Json, type MockGap, type PastRun, type QueuedRun, type SourceFeedback, type TestStatus, type TestSummary, type Trace,
 } from './lib/data';
 import { fetchActiveRuns, isWeb, requestRun, requestRuns, requestSuggestions } from './runs';
 
@@ -92,6 +92,7 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const failedDraft = useRef<Draft | null>(null);
   // Accepting a proposal as a known bug asks for the reason first (null: not asking).
   const [knownBugReason, setKnownBugReason] = useState<string | null>(null);
   const [notice, setNotice] = useState<Notice>(null);
@@ -165,6 +166,8 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
   // Suggest assertions on a proposal (web mode): the test it is for while drafting, then what came of it.
   const [suggesting, setSuggesting] = useState<string | null>(null);
   const [suggestNotice, setSuggestNotice] = useState<Notice>(null);
+  // With no feedback anywhere on the trace, Suggest first asks the expert what went wrong (null: not asking).
+  const [whatWentWrong, setWhatWentWrong] = useState<string | null>(null);
   const previewing = useRef('');
   const [showResults, setShowResults] = useState(false);
   const [repetitions, setRepetitions] = useState(3);
@@ -225,6 +228,7 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
     // Flush pending edits on the test being left instead of waiting for its autosave timer.
     if (selected && draft && dirty && !built?.error) void saveExample(selected, draft);
     setSelectedId(id);
+    setWhatWentWrong(null);
     setPreview(null);
     setSuggestNotice(null);
     setNotice(null);
@@ -303,8 +307,8 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
       + `${turns ? `, ${turns} earlier turn${turns === 1 ? '' : 's'} as history` : ''}. Add assertions, then run it.`;
   };
 
-  // Reads a trace for the preview. The feedback that flagged it (a thumbs-down and its comment) sits on the queued
-  // run, or on the trace's root run.
+  // Reads a trace for the preview, with every piece of feedback on any of its runs (any key: a thumbs-down, an online
+  // evaluator's score on the model call, a reviewer's correction).
   const openPreview = async (source: 'flagged' | 'past run', traceId: string, queueRunId?: string) => {
     previewing.current = traceId;
     setPreview({ source, traceId, queueRunId, trace: null, feedback: [], error: '' });
@@ -312,7 +316,7 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
     setImportStatus(null);
     try {
       const trace = await fetchTrace(traceId, tools);
-      const feedback = await fetchRunFeedback(queueRunId || text(trace.root.id)).catch(() => []);
+      const feedback = await fetchTraceFeedback(traceId).catch(() => []);
       if (previewing.current === traceId) setPreview((current) => (current?.traceId === traceId ? { ...current, trace, feedback } : current));
     } catch (error) {
       if (previewing.current === traceId) setPreview((current) => (current?.traceId === traceId ? { ...current, error: errorMessage(error) } : current));
@@ -350,17 +354,36 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
     }
   };
 
-  // Drafts 2-4 assertions from the proposal's message, original reply and flag. They go in as ordinary rows (an empty
-  // one is replaced), named from their sentences, for the expert to edit or delete.
-  const suggestAssertions = async () => {
+  // Drafts 2-4 assertions from everything known about the proposal's run (the agent's instructions and tools, the
+  // conversation, the tool results, the original reply and the flag). They go in as ordinary rows (an empty one is
+  // replaced), named from their sentences, for the expert to edit or delete.
+  const suggestAssertions = async (note?: string) => {
     if (!selected || !draft) return;
     const id = selected.id;
     setSuggesting(id);
     setSuggestNotice(null);
     try {
-      const feedback = Array.isArray(selected.metadata.source_feedback) ? selected.metadata.source_feedback.filter(isRecord) : [];
+      // Re-read the trace's feedback: an online evaluator or a reviewer may have added some since the import.
+      const traceId = text(selected.metadata.source_trace_id);
+      const stored = Array.isArray(selected.metadata.source_feedback) ? selected.metadata.source_feedback.filter(isRecord) : [];
+      const live = traceId ? await fetchTraceFeedback(traceId).catch(() => null) : null;
+      const feedback: Json[] = [...(live && live.length ? live : stored)];
+      if (note) feedback.push({ key: 'expert note', score: null, comment: note });
+      if (!feedback.length) {
+        // Without any feedback the drafter can only guess what went wrong; one line from the expert fixes that.
+        setWhatWentWrong('');
+        return;
+      }
+      setWhatWentWrong(null);
       const existing = draft.assertions.map((row) => row.assertion.trim()).filter(Boolean);
-      const sentences = await requestSuggestions(draft.prompt, text(selected.metadata.source_output), feedback, existing);
+      // The test as it would be saved: its history and mocks are what the run saw before and during the reply.
+      const inputs = toPayload(selected, draft).payload?.inputs ?? {};
+      const sentences = await requestSuggestions({
+        prompt: draft.prompt, reply: text(selected.metadata.source_output), feedback, existing,
+        history: Array.isArray(inputs.history) ? inputs.history.filter(isRecord) : [],
+        mocks: isRecord(inputs.mock_tools) ? inputs.mock_tools : {},
+        traceId: text(selected.metadata.source_trace_id),
+      });
       setDrafts((current) => {
         if (!current[id]) return current;
         const kept = current[id].assertions.filter((row) => row.assertion.trim() || row.name);
@@ -422,16 +445,18 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
       }
       setNotice(null);
     } catch (error) {
-      setNotice({ kind: 'error', text: `Save failed: ${errorMessage(error)}` });
+      failedDraft.current = exampleDraft;
+      setNotice({ kind: 'error', text: `Save failed: ${errorMessage(error)}. It will try again when you next edit the test.` });
     } finally {
       savingIds.current.delete(example.id);
       setSaving(savingIds.current.size > 0);
     }
   };
 
-  // Autosave the open test a moment after the last edit, once it's valid.
+  // Autosave the open test a moment after the last edit, once it's valid. A draft whose save failed isn't retried
+  // until it changes: retrying a persistent error (no permission, LangSmith down) every second would hammer the API.
   useEffect(() => {
-    if (!selected || !draft || !dirty || built?.error) return;
+    if (!selected || !draft || !dirty || built?.error || failedDraft.current === draft) return;
     const timer = window.setTimeout(() => void saveExample(selected, draft), AUTOSAVE_MS);
     return () => window.clearTimeout(timer);
   }, [draft, dirty, built?.error, saving]);
@@ -860,11 +885,23 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
                     Add assertion
                   </Button>
                   {/* Needs the server's judge model, so web mode only. */}
-                  {isProposal(selected) && isWeb() ? (
+                  {isProposal(selected) && isWeb() && whatWentWrong === null ? (
                     <Button size="sm" variant="outlined" color="secondary" onClick={() => void suggestAssertions()} disabled={suggesting !== null}
-                      title="Drafts 2-4 assertions from the message, the original reply and the flag's comment">
+                      title="Drafts 2-4 assertions from the agent's instructions and tools, the conversation, the tool results, the original reply and all feedback on the trace">
                       {suggesting === selected.id ? 'Suggesting…' : 'Suggest assertions'}
                     </Button>
+                  ) : null}
+                  {isProposal(selected) && isWeb() && whatWentWrong !== null ? (
+                    <span className="flex flex-wrap items-center gap-space-2">
+                      <span className="text-xs text-secondary">This trace has no feedback. What went wrong?</span>
+                      <input className={`${fieldClass} w-80`} autoFocus value={whatWentWrong} aria-label="What went wrong"
+                        placeholder="e.g. It said no instead of offering options" onChange={(event) => setWhatWentWrong(event.currentTarget.value)}
+                        onKeyDown={(event) => { if (event.key === 'Enter' && whatWentWrong.trim()) void suggestAssertions(whatWentWrong.trim()); }} />
+                      <Button size="sm" color="primary" onClick={() => void suggestAssertions(whatWentWrong.trim())} disabled={!whatWentWrong.trim() || suggesting !== null}>
+                        {suggesting === selected.id ? 'Suggesting…' : 'Suggest'}
+                      </Button>
+                      <Button size="sm" variant="outlined" color="secondary" onClick={() => setWhatWentWrong(null)}>Cancel</Button>
+                    </span>
                   ) : null}
                   {suggestNotice ? <Text variant="xs" color={suggestNotice.kind === 'error' ? 'error' : 'tertiary'}>{suggestNotice.text}</Text> : null}
                 </div>

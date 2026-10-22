@@ -159,12 +159,18 @@ class SuggestRequest(BaseModel):
     reply: str = ""
     feedback: list[dict] = []
     existing: list[str] = []
+    history: list[dict] = []
+    mocks: dict = {}
+    trace_id: str = ""
 
 
 @app.post("/api/suggest-assertions")
 def suggest_assertions(body: SuggestRequest) -> dict:
-    """2-4 draft assertions for a proposal, from its prompt, original reply and flag (drafting.py)."""
-    return {"assertions": drafting.suggest_assertions(body.prompt, body.reply, body.feedback, body.existing)}
+    """2-4 draft assertions for a proposal, from everything known about the run: the agent's instructions and tools
+    (from the flagged trace, else the hook), the conversation before the message, the tool results, the original reply
+    and the flag (drafting.py)."""
+    return {"assertions": drafting.suggest_assertions(body.prompt, body.reply, body.feedback, body.existing,
+                                                      body.history, body.mocks, body.trace_id)}
 
 
 class RewriteRequest(BaseModel):
@@ -235,7 +241,7 @@ async def langsmith_proxy(path: str, request: Request) -> Response:
     headers = {"x-api-key": client.api_key or "", "content-type": "application/json"}
     if os.environ.get("LANGSMITH_WORKSPACE_ID"):
         headers["x-tenant-id"] = os.environ["LANGSMITH_WORKSPACE_ID"]
-    upstream = await _http.request(request.method, f"/{path}", params=request.query_params,
+    upstream = await _http.request(request.method, f"/{path}", params=list(request.query_params.multi_items()),
                                    content=await request.body() or None, headers=headers)
     return Response(upstream.content, status_code=upstream.status_code,
                     media_type=upstream.headers.get("content-type", "application/json"))
