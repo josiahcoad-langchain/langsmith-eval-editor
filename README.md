@@ -18,7 +18,7 @@ A test editor for LangChain agents, backed by a LangSmith dataset. Tests read li
 - **The test header shows the last run**: when, how it went, total and per-run cost, median time, and the agent commit.
 - **Out-of-date results are marked.** If the test was edited after its last run, or the agent's code changed, the results are flagged instead of passed off as current.
 
-![The editor: a test's mocks and prompt on the left, its experiments on the right. The newest run errored because get_shipping_status has no mock.](docs/screenshot.png)
+![The editor: proposals and tests on the left; one test's context, files, history and mocks in the middle.](docs/screenshot.png)
 
 The UI runs either as a normal web app served by the eval server (**standalone**, the default) or inside LangSmith as a **custom app**. Both use the same `App.tsx`.
 
