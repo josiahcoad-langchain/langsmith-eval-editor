@@ -51,7 +51,7 @@ function isRateLimit(error: unknown) {
   return status === 429 || status === '429';
 }
 
-export async function callLangSmith<T>(operation: string, args?: { params?: Record<string, string>; body?: unknown }) {
+export async function callLangSmith<T>(operation: string, args?: { params?: Record<string, string | string[]>; body?: unknown }) {
   let lastError: unknown;
   for (let attempt = 0; attempt < 4; attempt += 1) {
     try {
@@ -871,14 +871,41 @@ function finalReply(outputs: unknown): string {
   return typeof outputs.output === 'string' ? outputs.output.slice(0, 6000) : '';
 }
 
-export type SourceFeedback = { key: string; score: number | null; comment: string };
+// One piece of feedback, whatever its key: a thumbs-down, a "hallucination" score from an online evaluator, a
+// reviewer's correction. `run` names the run it's on when that isn't the trace's root (e.g. the model call).
+export type SourceFeedback = { key: string; score: number | null; comment: string; value?: unknown; correction?: unknown; run?: string };
 
-// Feedback on the run a proposal came from: usually the thumbs-down and its comment that flagged it.
-export async function fetchRunFeedback(runId: string): Promise<SourceFeedback[]> {
-  const rows = await callLangSmith<unknown>('GET /api/v1/feedback', { params: { run: runId, limit: '20' } });
-  return (Array.isArray(rows) ? rows : []).filter(isRecord).map((row) => ({
-    key: text(row.key), score: typeof row.score === 'number' ? row.score : null, comment: text(row.comment),
+// Every piece of feedback on every run in a trace, with no assumption about keys: together they say what went wrong
+// better than any one of them, and the drafter reads them all.
+export async function fetchTraceFeedback(traceId: string): Promise<SourceFeedback[]> {
+  const runs = await queryAll({ trace: traceId, limit: 100, select: ['id', 'name', 'parent_run_id'] });
+  const names = new Map(runs.map((run) => [text(run.id), run.parent_run_id ? text(run.name) : '']));
+  const ids = [...names.keys()];
+  const rows: Json[] = [];
+  for (let at = 0; at < ids.length; at += 50) {
+    const page = await callLangSmith<unknown>('GET /api/v1/feedback', { params: { run: ids.slice(at, at + 50), limit: '100' } });
+    rows.push(...(Array.isArray(page) ? page.filter(isRecord) : []));
+  }
+  const seen = new Set<string>();
+  return rows.filter((row) => !seen.has(text(row.id)) && seen.add(text(row.id))).map((row) => ({
+    key: text(row.key),
+    score: typeof row.score === 'number' ? row.score : null,
+    comment: text(row.comment),
+    ...(row.value !== undefined && row.value !== null ? { value: row.value } : {}),
+    ...(row.correction !== undefined && row.correction !== null ? { correction: row.correction } : {}),
+    ...(names.get(text(row.run_id)) ? { run: names.get(text(row.run_id)) } : {}),
   }));
+}
+
+// A piece of feedback in one line: `key = score (or value) · on run · "comment" · correction: …`.
+export function feedbackLine(row: Json) {
+  const shown = typeof row.score === 'number' ? String(row.score) : row.value !== undefined ? (typeof row.value === 'string' ? row.value : JSON.stringify(row.value)) : '';
+  return [
+    `${text(row.key) || 'feedback'}${shown ? ` = ${shown}` : ''}`,
+    text(row.run) ? `on ${text(row.run)}` : '',
+    text(row.comment) ? `“${text(row.comment)}”` : '',
+    row.correction !== undefined ? `correction: ${typeof row.correction === 'string' ? row.correction : JSON.stringify(row.correction)}` : '',
+  ].filter(Boolean).join(' · ');
 }
 
 // --- Gaps in a test ------------------------------------------------------------------------------------------

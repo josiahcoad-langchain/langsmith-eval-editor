@@ -241,7 +241,7 @@ async def langsmith_proxy(path: str, request: Request) -> Response:
     headers = {"x-api-key": client.api_key or "", "content-type": "application/json"}
     if os.environ.get("LANGSMITH_WORKSPACE_ID"):
         headers["x-tenant-id"] = os.environ["LANGSMITH_WORKSPACE_ID"]
-    upstream = await _http.request(request.method, f"/{path}", params=request.query_params,
+    upstream = await _http.request(request.method, f"/{path}", params=list(request.query_params.multi_items()),
                                    content=await request.body() or None, headers=headers)
     return Response(upstream.content, status_code=upstream.status_code,
                     media_type=upstream.headers.get("content-type", "application/json"))

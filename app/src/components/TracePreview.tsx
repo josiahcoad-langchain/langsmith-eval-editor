@@ -1,6 +1,6 @@
 import { Button } from '@langchain/macaw-components/Button';
 import { Spinner } from '@langchain/macaw-components/Spinner';
-import { shortDate, tracePreview, type SourceFeedback, type Trace } from '../lib/data';
+import { feedbackLine, shortDate, tracePreview, type Json, type SourceFeedback, type Trace } from '../lib/data';
 import { Markdown } from './Markdown';
 import { ToolCalls } from './ToolCalls';
 
@@ -32,14 +32,8 @@ export function TracePreview({ source, trace, feedback, error, making, onMake, o
         </span>
       ) : null}
       {!trace && !error ? <div className="flex items-center gap-space-2"><Spinner size="sm" /><span className="text-xs text-tertiary">Reading the trace…</span></div> : null}
-      {feedback.map((row, index) => (
-        <span key={index} className="text-xs text-secondary">
-          <span className={`mr-space-1 rounded-sm px-space-1 font-medium ${row.score === 0 ? 'bg-error-subtle text-error-primary' : 'bg-surface-level-2 text-secondary'}`}>
-            {row.key || 'feedback'}{row.score === null ? '' : `: ${row.score === 0 ? 'thumbs down' : row.score === 1 ? 'thumbs up' : row.score}`}
-          </span>
-          {row.comment ? `“${row.comment}”` : 'No comment.'}
-        </span>
-      ))}
+      {feedback.map((row, index) => <span key={index} className="text-xs text-secondary">{feedbackLine(row as Json)}</span>)}
+      {trace && !feedback.length ? <span className="text-xs text-tertiary">No feedback on this trace.</span> : null}
       {preview ? (
         <>
           <div className="flex flex-col gap-space-1">

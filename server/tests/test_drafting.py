@@ -68,3 +68,16 @@ def test_system_prompt_and_tools_are_read_from_a_traced_model_call():
     assert drafting._system_prompt({"messages": [{"role": "system", "content": "Plain."}]}) == "Plain."
     assert drafting._tool({"type": "function", "function": {"name": "a", "description": "b"}}) == {"name": "a", "description": "b"}
     assert drafting._tool({"name": "a", "description": "b", "input_schema": {}}) == {"name": "a", "description": "b"}
+
+
+def test_every_kind_of_feedback_reaches_the_drafter(model):
+    model["reply"] = []
+    drafting.suggest_assertions("p", "r", [
+        {"key": "hallucination", "score": 1, "comment": "invented a delivery date", "run": "ChatAnthropic"},
+        {"key": "tone", "value": "curt", "comment": ""},
+        {"key": "reviewer", "score": None, "comment": "should offer options", "correction": "Offer to check UPS express."},
+    ], [])
+    prompt = model["prompt"]
+    assert "hallucination, score 1, on the ChatAnthropic step: invented a delivery date" in prompt
+    assert "tone, value curt: no comment" in prompt
+    assert "(correction: Offer to check UPS express.)" in prompt

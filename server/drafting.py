@@ -29,8 +29,8 @@ agent says, asks, refuses or calls. One claim per sentence (no "and" joining two
 starting with "It" for the agent, e.g. "It asks for the order number before calling lookup_order." """
 
 SUGGEST_PROMPT = """A subject-matter expert flagged a run of an AI agent. Draft {count} assertions for a regression
-test: statements that must be true of a GOOD run for the same message. The flag's comment says what went wrong; the
-assertions should say what the agent should have done instead, so today's reply fails at least one of them.
+test: statements that must be true of a GOOD run for the same message. The feedback on the run (any keys: scores,
+evaluator results, comments, corrections) says what went wrong; the assertions should say what the agent should have done instead, so today's reply fails at least one of them.
 
 Judge "good" by the agent's own instructions and tools below, not by what it happened to do: the original reply is
 the run that was flagged, so it may be exactly the behavior to rule out. Prefer the rules in the instructions that
@@ -67,9 +67,9 @@ Don't repeat these assertions, which the test already has:
 {reply}
 </original_reply>
 
-<flag>
+<feedback_on_the_run>
 {feedback}
-</flag>"""
+</feedback_on_the_run>"""
 
 REWRITE_PROMPT = """An assertion in a test of an AI agent is graded inconsistently: {diagnosis}. Rewrite it so that
 every careful judge would grade the same reply the same way. Keep what it is checking; make it precise. Use the
@@ -102,8 +102,7 @@ class Drafts(BaseModel):
 
 def suggest_assertions(prompt: str, reply: str, feedback: list[dict], existing: list[str], history: list[dict] | None = None,
                        mocks: dict | None = None, trace_id: str = "") -> list[str]:
-    flag = "\n".join(f"{row.get('key') or 'feedback'} (score {row.get('score')}): {row.get('comment') or 'no comment'}"
-                     for row in feedback) or "No comment: infer what went wrong from the reply."
+    flag = "\n".join(_feedback_line(row) for row in feedback) or "No feedback: infer what went wrong from the reply."
     agent = agent_context(trace_id)
     text = SUGGEST_PROMPT.format(
         count="2 to 4", rules=RULES, existing=json.dumps(existing) if existing else "none",
@@ -113,6 +112,22 @@ def suggest_assertions(prompt: str, reply: str, feedback: list[dict], existing: 
         tool_results=_clip(json.dumps(mocks, indent=1, default=str)) if mocks else "(none)",
         prompt=prompt, reply=reply or "(no reply recorded)", feedback=flag)
     return _clean(_draft(text), existing)
+
+
+def _feedback_line(row: dict) -> str:
+    """One piece of feedback, whatever its key ("user-score", "hallucination", a reviewer's correction...): every
+    field it has, since the drafter needs all of them to work out what went wrong."""
+    parts = [str(row.get("key") or "feedback")]
+    if row.get("score") is not None:
+        parts.append(f"score {row['score']}")
+    if row.get("value") not in (None, ""):
+        parts.append(f"value {json.dumps(row['value'], default=str) if not isinstance(row['value'], str) else row['value']}")
+    if row.get("run"):
+        parts.append(f"on the {row['run']} step")
+    line = ", ".join(parts) + f": {row.get('comment') or 'no comment'}"
+    if row.get("correction") not in (None, ""):
+        line += f" (correction: {json.dumps(row['correction'], default=str) if not isinstance(row['correction'], str) else row['correction']})"
+    return line
 
 
 def agent_context(trace_id: str = "") -> dict[str, Any]:
