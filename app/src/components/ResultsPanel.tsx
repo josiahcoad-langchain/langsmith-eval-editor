@@ -3,6 +3,7 @@ import { Spinner } from '@langchain/macaw-components/Spinner';
 import { Text } from '@langchain/macaw-components/Text';
 import { duration, errorMessage, fetchResults, isRecord, openTrace, shortDate, text, type Example, type TestResult } from '../lib/data';
 import { fetchPending, type PendingRun } from '../runs';
+import { RunCompare } from './RunCompare';
 
 type ExperimentGroup = { experimentId: string; experimentName: string; start: string; runs: TestResult[] };
 
@@ -30,6 +31,10 @@ export function ResultsPanel({ datasetId, example, workspaceId, onClose }: { dat
   const [checking, setChecking] = useState(false);
   const [checkedAt, setCheckedAt] = useState<number | null>(null);
   const [now, setNow] = useState(() => Date.now());
+  // Up to two runs picked for side-by-side comparison (RunCompare), oldest pick first.
+  const [picked, setPicked] = useState<string[]>([]);
+  const [comparing, setComparing] = useState(false);
+  const togglePick = (runId: string) => setPicked((current) => (current.includes(runId) ? current.filter((id) => id !== runId) : [...current, runId].slice(-2)));
 
   // A one-second tick so "Checked N s ago" visibly counts up between refreshes.
   useEffect(() => {
@@ -76,6 +81,10 @@ export function ResultsPanel({ datasetId, example, workspaceId, onClose }: { dat
     }
   };
 
+  const groups = results ? groupByExperiment(results) : [];
+  // "Mar 3, 2:10 PM · repetition 2", so a comparison says which run is which.
+  const runLabels = Object.fromEntries(groups.flatMap((group) => group.runs.map((run, index) => [run.runId, `${shortDate(group.start)} · repetition ${index + 1}`])));
+  const pickedRuns = picked.map((id) => results?.find((r) => r.runId === id)).filter((r): r is TestResult => Boolean(r));
   const checkNames = new Set(Array.isArray(example.outputs.checks) ? example.outputs.checks.map((row) => (isRecord(row) ? text(row.name) : '')) : []);
   return (
     <aside className="flex min-h-0 flex-col gap-space-3 overflow-y-auto border-l border-default pl-space-4">
@@ -107,7 +116,16 @@ export function ResultsPanel({ datasetId, example, workspaceId, onClose }: { dat
       {error ? <Text variant="xs" color="error">{error}</Text> : null}
       {!results && !error ? <div className="flex items-center gap-space-2"><Spinner size="sm" /><Text variant="xs" color="tertiary">Loading results…</Text></div> : null}
       {results && results.length === 0 && !queued.length ? <Text variant="xs" color="tertiary">No runs of this test yet. Click Run test.</Text> : null}
-      {results ? groupByExperiment(results).map((group) => {
+      {results && results.length > 1 ? (
+        <div className="flex flex-wrap items-center gap-space-2 text-xs text-tertiary">
+          <span>{picked.length === 2 ? 'Two runs picked.' : `Tick two runs to compare them${picked.length ? ' (1 picked)' : ''}.`}</span>
+          <button type="button" disabled={pickedRuns.length !== 2} onClick={() => setComparing(true)}
+            className="rounded-sm border border-default px-space-2 text-primary hover:border-focus disabled:opacity-50">Compare</button>
+          {picked.length ? <button type="button" className="text-secondary underline hover:text-primary" onClick={() => setPicked([])}>Clear</button> : null}
+        </div>
+      ) : null}
+      {comparing && pickedRuns.length === 2 ? <RunCompare runs={[pickedRuns[0], pickedRuns[1]]} labels={runLabels} onClose={() => setComparing(false)} /> : null}
+      {groups.map((group) => {
         // The test's own assertions, then its code checks.
         // Code checks (outputs.checks) log feedback exactly like assertions, so they are told apart by name and listed last.
         const rank = (key: string) => (checkNames.has(key) ? 2 : 1);
@@ -161,6 +179,10 @@ export function ResultsPanel({ datasetId, example, workspaceId, onClose }: { dat
                 return (
                   <div key={result.runId} className="flex flex-col gap-space-1">
                     <div className="flex flex-wrap items-baseline gap-x-space-2 text-xs">
+                      {results && results.length > 1 ? (
+                        <input type="checkbox" className="self-center" checked={picked.includes(result.runId)} onChange={() => togglePick(result.runId)}
+                          aria-label={`Compare ${runLabels[result.runId] ?? `repetition ${index + 1}`}`} />
+                      ) : null}
                       <span className="text-secondary">Repetition {index + 1}</span>
                       <span className="text-tertiary">
                         {isRunning ? 'running' : result.error ? 'error' : `${passed} of ${scored.length} ${scored.length === 1 ? 'check' : 'checks'} passed${result.end ? ` · ${duration(result.start, result.end)}` : ''}`}
@@ -194,7 +216,7 @@ export function ResultsPanel({ datasetId, example, workspaceId, onClose }: { dat
             ) : null}
           </div>
         );
-      }) : null}
+      })}
     </aside>
   );
 }

@@ -140,7 +140,7 @@ async function fetchRequests(): Promise<Json[]> {
 // --- Re-grade (web mode): grade one assertion again over the test's saved transcripts ---------------------------
 
 export type Regrade = {
-  experiment: string; judges: string[]; times: number;
+  experiment: string; assertion: { name: string; assertion: string }; judges: string[]; times: number;
   repetitions: { number: number; original: boolean | null; regrades: Record<string, (boolean | null)[]>; reasons: Record<string, string>; answer: string; tool_calls: string[] }[];
   cause: 'judge_unreliable' | 'grade_overturned' | 'assertion_ambiguous' | 'agent_varied' | 'consistent_fail' | 'consistent_pass';
   advice: string;
@@ -155,6 +155,25 @@ export async function requestRegrade(exampleId: string, name: string, times = 3)
   });
   if (!response.ok) throw await errorFrom(response);
   return (await response.json()) as Regrade;
+}
+
+// --- Assertion drafts from the judge model (web mode, server/drafting.py) --------------------------------------
+
+async function postDrafts(path: string, body: Json): Promise<string[]> {
+  const response = await fetch(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  if (!response.ok) throw await errorFrom(response);
+  const answer = (await response.json()) as { assertions?: unknown };
+  return Array.isArray(answer.assertions) ? answer.assertions.map(text).filter(Boolean) : [];
+}
+
+// 2-4 assertions for a proposal, from its message, the original reply and the flag's comment.
+export function requestSuggestions(prompt: string, reply: string, feedback: Json[], existing: string[]) {
+  return postDrafts('/api/suggest-assertions', { prompt, reply, feedback, existing });
+}
+
+// 1-2 rewrites of an assertion Re-grade found ambiguous or unreliably graded, from the expert's and judges' reasons.
+export function requestRewrites(assertion: string, cause: string, expertReasons: string[], judgeReasons: string[]) {
+  return postDrafts('/api/rewrite-assertion', { assertion, cause, expert_reasons: expertReasons, judge_reasons: judgeReasons });
 }
 
 // --- Files in a test's Given (server/attach.py). Web mode only: uploading needs the server. ---

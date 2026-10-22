@@ -23,6 +23,7 @@ A Given / When / Assert test editor for an agent, over one LangSmith dataset (de
   - `ResultsPanel`: polls every 15 s, groups repetitions by experiment.
   - `ResultChip`: per assertion and check.
   - `LastRun`: the header line.
+  - `TracePreview`, `RunCompare`, `ToolCalls` (shared by the drill-down, compare and preview).
   - `ActionsMenu`: the "⋯" menus.
   - `fields`: `TextAreaField` with `maxRows` grows, then scrolls.
 
@@ -64,10 +65,19 @@ A Given / When / Assert test editor for an agent, over one LangSmith dataset (de
     assertion or check never blocks saving. Check types show plain-English labels (`CHECK_LABELS`).
   - Results say "2 of 3 checks" and chips say "2/3 runs"; mock rows preview values; turns are counted as user turns
     everywhere; runs from before content hashes say "can't tell whether this result is current".
+  - A flagged card or an Import pick opens `TracePreview` in the middle column (message, reply, tool calls, flag);
+    nothing is written until Make proposal. `fetchTrace` reads the trace once; `importTrace(trace)` builds the draft from it.
+  - "Judge right? no" asks for a reason, saved as the `human-label` feedback's comment. When Re-grade says
+    `assertion_ambiguous` or `judge_unreliable`, the drill-down asks `/api/rewrite-assertion` (server/drafting.py) for 1-2
+    rewrites from those reasons and the judges'; Use this replaces the sentence and keeps the name.
+  - Suggest assertions (proposals, web mode only: it needs the server's judge model) posts the prompt, `source_output`
+    and `source_feedback` to `/api/suggest-assertions` and appends 2-4 rows, replacing an empty one.
+  - Results: tick two repetitions (any experiments) and Compare opens `RunCompare`, side by side.
+  - `assertionHints` (data.ts): quiet hints under an assertion for "and" joining two claims, vague words, or nothing observable.
 
 ## Gotchas
 
-- **1 MB custom-app bundle limit**; the bundle is ~910 KB. `postcss.config.js` drops non-Latin font subsets. Don't add Macaw's DropdownMenu back (~90 KB).
+- **1 MB custom-app bundle limit**; the bundle is ~957 KB. `postcss.config.js` drops non-Latin font subsets. Don't add Macaw's DropdownMenu back (~90 KB).
 - **`langsmith apps dev` token expiry.** It keeps the token it started with; after ~15 minutes calls return 401. Restart it.
 - **No binary files in the app directory.** The dev server rejects them; screenshots live in `/docs`.
 - **Errored runs.** LangSmith hands an errored run's evaluators `{"output": None}`, not `{}`. The harness detects an errored run by the missing `transcript`.

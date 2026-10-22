@@ -33,6 +33,7 @@ server/
   evidence.py     what a grader sees of a run, fitted under a size limit without cutting it off
   regrade.py      Re-grade: one assertion over saved transcripts, several times, with every judge
   diagnose.py     reads those grades: agent varied, judge unreliable, assertion ambiguous, or grade overturned
+  drafting.py     assertion drafts from the judge model: suggestions for a proposal, rewrites of an ambiguous one
   harness.py      runs tests via langsmith.evaluate: repetitions, judge, code checks
   suite.py        the pytest-like layer: selection, markers, verdicts, summary, JUnit
   cli.py          runs tests from the command line, like pytest
@@ -223,6 +224,8 @@ Then set the names in `server/.env` and `app/.env` (copy each `.env.example`): `
 - **8 tests run at a time** (`EVAL_PARALLEL=N` on the server or CLI, or the CLI's `--parallel N`, changes it). Every agent run lives in one process, so "all at once" can exhaust the machine's memory: 81 tests × 3 repetitions of a large agent froze a 32 GB Mac. The server queues the rest, and the list shows each test as queued or running until its result lands.
 - **Status dots** come from the dataset's experiment list, newest first, read only until every test has a status. That's usually one request, however many experiments the dataset has run. They refresh every 30 s, and right away when a run finishes.
 - **Results** lists every run of the selected test, newest first, with each assertion's and check's score and reason per repetition.
+- **Compare two runs.** Tick two repetitions in Results, of one experiment or of two, and click **Compare**: their grades, replies and tool calls side by side, with what differs said first (which grades differ; whether the tool calls, their arguments or their results differ).
+- **Assertion hints.** Under an assertion, a quiet hint flags wordings judges grade inconsistently: two claims joined by "and", vague words ("appropriate", "good", "properly"), or nothing a transcript would show. They're advice; nothing blocks saving.
 - **Why did it fail?** Click an assertion's or check's result chip. Each repetition of the newest run shows the judge's verdict and reason **beside the agent's reply and tool calls**. Then click **Re-grade**. It grades those same saved replies again, 3 times with each judge the hook offers, without re-running the agent (judges' cost only), and names the cause:
 
   | Diagnosis | What it means | What to fix |
@@ -233,9 +236,11 @@ Then set the names in `server/.env` and `app/.env` (copy each `.env.example`): `
   | **The original grade was wrong** | Every fresh grade agrees and contradicts the original: grading at run time was broken or has changed | Nothing: re-run |
 
   Code checks are deterministic, so a mixed code-check result always means the agent varied. Re-grade needs the web server.
+
+  When the diagnosis is **ambiguous** or **unreliable**, Re-grade also drafts 1 or 2 rewrites of the assertion from the reasons the expert gave for "Judge right? no" and the judges' reasons on the disputed repetitions (`drafting.py`, the judge model). **Use this** puts one in the test; the name stays, so its results stay together.
 - **Out of date.** A result stops counting as current when the test was edited after the run, or when the agent's code changed since. "Edited" compares a content hash of the test's inputs and assertions with the one the run recorded, so a new description or tag doesn't count. "The agent's code changed" means a commit since the run touched `EVAL_AGENT_PATHS` (space-separated git pathspecs; default the whole checkout), so a commit that only changes evals or docs leaves results current. Out-of-date dots and chips fade, and the header strikes the last run through with the reason and a **Run it again** link.
 - **Agent replies render as markdown** in the drill-down, the way a chat UI shows them.
-- **Judge right? yes / no.** Each graded repetition in the drill-down takes a label: was the judge's verdict right? It's saved as `human-label` feedback on the run (score = the right verdict, value = the assertion's name). Labels are what the judge bench measures judges against.
+- **Judge right? yes / no.** Each graded repetition in the drill-down takes a label: was the judge's verdict right? It's saved as `human-label` feedback on the run (score = the right verdict, value = the assertion's name, comment = the reason). **No** asks for a short reason first; Re-grade's rewrites are built from those reasons. Labels are what the judge bench measures judges against.
 
 ## Proposals: from trace to test
 
@@ -250,10 +255,11 @@ flagged trace ──run rule──► annotation queue ──open──► propo
 
 - **The inbox** is an annotation queue, `eval-editor-demo-proposals` (`PROPOSALS_QUEUE` / `VITE_PROPOSALS_QUEUE`). The server creates it on start. The editor lists its runs at the top of the rail, under **Proposals**, marked *flagged*.
 - **Flagged traces get there by a run rule.** `uv run python proposals.py --rule` creates one on the agent's tracing project: every root run that gets `user_score = 0` feedback goes to the queue. Edit `FLAGGED_FILTER` in `server/proposals.py` to match the feedback your app writes. `proposals.py --add <run-id>` queues a run by hand.
-- **Opening a flagged trace imports it** as a proposal:
+- **Clicking a flagged trace previews it**: the message, the agent's reply, its tool calls and the flag's comment. Nothing is written until **Make proposal**, which imports it as a proposal:
   - The root run's last user message becomes the prompt (When), and every message before it becomes **History**, including the agent's earlier tool calls and their results. The agent is replayed into the same situation it was in.
   - Each tool called during this turn becomes a mock. A tool called once returns that response for any arguments. A tool called several times with different arguments gets one case per argument set.
-  - **Import** (paste a trace link, or pick a recent run) makes a proposal the same way, without the queue.
+  - **Import** (paste a trace link, or pick a recent run) previews and makes a proposal the same way, without the queue.
+- **Suggest assertions** (web mode) drafts 2 to 4 one-sentence assertions from the message, the original reply and the flag's comment (`drafting.py`, the judge model). They go in as ordinary assertions, for the expert to edit or delete.
 - **A proposal is a dataset example** with `metadata.status = "proposal"` (and `source_run_id`, `source_trace_id`). It runs exactly like a test, and its results stay with it after Accept. Run all, Run failing and `cli.py` leave proposals out; `cli.py --proposals` includes them, and naming one runs it.
 - **Accept into eval set** sets the status to `active` and takes the run out of the queue. **Delete proposal** deletes the example and takes the run out of the queue too, so it isn't proposed again. The **×** on a flagged trace dismisses it without importing it.
 
