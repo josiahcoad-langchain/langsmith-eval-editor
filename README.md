@@ -147,6 +147,7 @@ A test is one dataset example:
 | `{"cases": [{"when": {"arg": "value"}, "response": ...}, {"response": ...}]}` | The first case whose `when` is a subset of the call's arguments. A case with no `when` matches anything |
 | `{"cases": [{"when_any_value": "P1", "response": ...}]}` | A case that matches when **any** argument (nested ones too) equals that value. Use it when the agent may send the same id under different argument names |
 | `{"sequence": [r1, r2, ...]}` | A different response per call. The last one repeats |
+| `{"cases": [{"after": {"update_post": {"post_id": "P1"}}, "response": ...}, {"response": ...}]}` | A case that matches only once this run has already made a **successful** call to each listed tool with those arguments (`{}` = any). A read can then see a write: `get_post` returns the old caption until `update_post` succeeds, and the new one after. Failed calls don't count |
 | `{"raise": "503 ..."}` | The call fails with that message. Usable as a case's response too |
 
 ### Files (images, video)
