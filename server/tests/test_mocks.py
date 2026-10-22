@@ -71,3 +71,34 @@ def test_empty_sequence_is_unmocked_not_a_crash():
     mocks = MockTools({"gen": {"sequence": []}}, today=TODAY)
     assert mocks.call("gen", {}, "c1").status == "error"
     assert mocks.unmocked == [{"name": "gen", "args": {}}]
+
+
+def _write_then_read_mocks():
+    return MockTools({
+        "update_post": {"cases": [{"when": {"post_id": "P9"}, "response": {"raise": "404"}}, {"response": "saved"}]},
+        "get_post": {"cases": [
+            {"after": {"update_post": {"post_id": "P1"}}, "response": {"caption": "Hi"}},
+            {"response": {"caption": "old text"}}]},
+    }, today=TODAY)
+
+
+def test_after_answers_a_read_differently_once_the_write_happened():
+    mocks = _write_then_read_mocks()
+    assert mocks.call("get_post", {"post_id": "P1"}, "c1").content == '{"caption": "old text"}'
+    assert mocks.call("get_post", {"post_id": "P1"}, "c2").content == '{"caption": "old text"}'
+    mocks.call("update_post", {"post_id": "P1", "caption": "Hi"}, "c3")
+    assert mocks.call("get_post", {"post_id": "P1"}, "c4").content == '{"caption": "Hi"}'
+
+
+def test_after_needs_the_listed_arguments_and_a_successful_call():
+    mocks = _write_then_read_mocks()
+    mocks.call("update_post", {"post_id": "P2"}, "c1")   # another post
+    mocks.call("update_post", {"post_id": "P9"}, "c2")   # fails with 404
+    assert mocks.call("get_post", {"post_id": "P1"}, "c3").content == '{"caption": "old text"}'
+
+
+def test_after_with_empty_arguments_matches_any_call_to_that_tool():
+    mocks = MockTools({"ship": "ok", "status": {"cases": [{"after": {"ship": {}}, "response": "shipped"}, {"response": "pending"}]}}, today=TODAY)
+    assert mocks.call("status", {}, "c1").content == "pending"
+    mocks.call("ship", {"order": "A1"}, "c2")
+    assert mocks.call("status", {}, "c3").content == "shipped"

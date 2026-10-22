@@ -30,19 +30,30 @@ function responseSummary(response: string): { fails: boolean; text: string } {
   return { fails: false, text: `"${textValue.length > 60 ? `${textValue.slice(0, 60)}…` : textValue}"` };
 }
 
-function WhenChips({ when, anyValue }: { when: string; anyValue?: string }) {
+function WhenChips({ when, anyValue, after }: { when: string; anyValue?: string; after?: string }) {
   let parsed: Json | null = null;
   try {
     parsed = when.trim() ? (JSON.parse(when) as Json) : null;
   } catch {
     return <span className="font-mono text-xs text-error-primary">invalid: {when}</span>;
   }
-  if ((!parsed || !Object.keys(parsed).length) && anyValue === undefined) return <span className="text-xs text-tertiary">Any call</span>;
+  let afterCalls: Json = {};
+  try {
+    afterCalls = after?.trim() ? (JSON.parse(after) as Json) : {};
+  } catch {
+    return <span className="font-mono text-xs text-error-primary">invalid after: {after}</span>;
+  }
+  if ((!parsed || !Object.keys(parsed).length) && anyValue === undefined && !Object.keys(afterCalls).length) return <span className="text-xs text-tertiary">Any call</span>;
   return (
     <span className="flex flex-wrap gap-space-1">
       {anyValue !== undefined ? (
         <span className="rounded-sm border border-default bg-surface-level-2 px-space-1 font-mono text-xs text-primary">any argument = {anyValue}</span>
       ) : null}
+      {Object.entries(afterCalls).map(([tool, args]) => (
+        <span key={`after-${tool}`} className="max-w-full break-all rounded-sm border border-default bg-brand-subtle px-space-1 font-mono text-xs text-primary">
+          after {tool}({isRecord(args) ? Object.entries(args).map(([k, v]) => `${k}=${typeof v === 'string' ? v : JSON.stringify(v)}`).join(', ') : ''})
+        </span>
+      ))}
       {Object.entries(parsed ?? {}).map(([arg, value]) => (
         <span key={arg} className="rounded-sm border border-default bg-surface-level-2 px-space-1 font-mono text-xs text-primary">
           {arg} = {typeof value === 'string' ? value : JSON.stringify(value)}
@@ -105,7 +116,7 @@ function MockToolEditor({ mock, tools, onChange, onRemove }: {
               <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center hover:bg-surface-level-2">
               <button type="button" aria-expanded={isOpen} onClick={() => setOpen(isOpen ? null : row.key)}
                 className="grid w-full grid-cols-[minmax(0,200px)_minmax(0,1fr)] items-center gap-space-3 px-space-3 py-space-2 text-left">
-                <WhenChips when={row.when} anyValue={row.anyValue} />
+                <WhenChips when={row.when} anyValue={row.anyValue} after={row.after} />
                 {preview.fails ? (
                   <span className="truncate text-xs"><span className="mr-space-1 rounded-sm bg-error-subtle px-space-1 font-medium text-error-primary">Fails</span>{preview.text}</span>
                 ) : (
@@ -126,6 +137,10 @@ function MockToolEditor({ mock, tools, onChange, onRemove }: {
                     <div className="grid grid-cols-2 items-end gap-space-2">
                       <TextField label="When the call's arguments include (JSON; empty = any)" value={row.when} onChange={(when) => patchRow(row.key, { when })} placeholder='{"order_id": "A1001"}' mono />
                       <TextField label="Or when any argument equals (text)" value={row.anyValue ?? ''} onChange={(anyValue) => patchRow(row.key, { anyValue: anyValue || undefined })} placeholder="A1001" mono />
+                      <div className="col-span-2">
+                        <TextField label="Only after these calls succeeded in this run (JSON; {} = any arguments)" value={row.after ?? ''}
+                          onChange={(after) => patchRow(row.key, { after: after || undefined })} placeholder='{"update_post": {"post_id": "P1"}}' mono />
+                      </div>
                     </div>
                   ) : null}
                   <TextAreaField label="Returns" value={row.response} onChange={(response) => patchRow(row.key, { response })}
@@ -146,7 +161,7 @@ function MockToolEditor({ mock, tools, onChange, onRemove }: {
           const key = keyId();
           const cases = mock.cases ?? [{ key: keyId(), when: '', response: mock.response }];
           // First match wins and an empty `when` matches anything, so new cases go before any catch-all.
-          const catchAll = cases.findIndex((row) => !row.when.trim() && row.anyValue === undefined);
+          const catchAll = cases.findIndex((row) => !row.when.trim() && row.anyValue === undefined && !row.after?.trim());
           const at = catchAll === -1 ? cases.length : catchAll;
           onChange({ cases: [...cases.slice(0, at), { key, when: '', response: '' }, ...cases.slice(at)], response: '' });
           setOpen(key);

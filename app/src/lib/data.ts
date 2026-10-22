@@ -9,7 +9,8 @@ export type Json = Record<string, unknown>;
 export type Example = { id: string; inputs: Json; outputs: Json; metadata: Json; isNew?: boolean; modifiedAt?: string };
 // A mock is one response for any arguments, or (cases set) the first case whose `when` matches the call's arguments.
 // `anyValue` is the other matcher: the case applies when any argument equals that string (`when_any_value`).
-export type MockCase = { key: string; when: string; response: string; anyValue?: string };
+// `after` (JSON text, {tool: {arg: value}}) holds the case back until the run has made those calls successfully.
+export type MockCase = { key: string; when: string; response: string; anyValue?: string; after?: string };
 export type MockTool = { key: string; tool: string; response: string; cases: MockCase[] | null };
 export type Assertion = { key: string; name: string; assertion: string };
 // A turn of the conversation before the prompt. An assistant turn can carry the tool calls it made, and a `tool` turn
@@ -263,6 +264,7 @@ export function toDraft(example: Example): Draft {
           when: isRecord(row.when) ? JSON.stringify(row.when) : '',
           response: responseText(row.response),
           ...(typeof row.when_any_value === 'string' ? { anyValue: row.when_any_value } : {}),
+          ...(isRecord(row.after) ? { after: JSON.stringify(row.after) } : {}),
         })) ?? null,
       };
     }),
@@ -316,9 +318,19 @@ export function toPayload(example: Example, draft: Draft): { payload?: Pick<Exam
         return { error: `${mock.tool}: a case's "when" isn't valid JSON.` };
       }
       if (when !== undefined && !isRecord(when)) return { error: `${mock.tool}: "when" must be an object like {"order_id": "A1001"}.` };
+      let after: unknown;
+      try {
+        after = row.after?.trim() ? JSON.parse(row.after) : undefined;
+      } catch {
+        return { error: `${mock.tool}: a case's "after" isn't valid JSON.` };
+      }
+      if (after !== undefined && !(isRecord(after) && Object.values(after).every(isRecord))) {
+        return { error: `${mock.tool}: "after" must look like {"update_post": {"post_id": "P1"}} ({} = any arguments).` };
+      }
       cases.push({
         ...(when ? { when } : {}),
         ...(row.anyValue !== undefined ? { when_any_value: row.anyValue } : {}),
+        ...(after ? { after } : {}),
         response: parseResponse(row.response),
       });
     }

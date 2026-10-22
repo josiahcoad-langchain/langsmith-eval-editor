@@ -11,6 +11,10 @@ A test's `inputs.mock_tools` maps a tool name to what it returns:
     "update_post": {"cases": [                                    `when_any_value` matches that value under any
         {"when_any_value": "P1", "response": {"raise": "400"}},    argument name (and inside nested args)
         {"response": "saved"}]}
+    "get_post": {"cases": [                                       `after` matches once this run has already made
+        {"after": {"update_post": {"post_id": "P1"}},              a successful call to each listed tool with those
+         "response": {"caption": "Hi"}},                           arguments ({} = any), so a read can see a write
+        {"response": {"caption": "old text"}}]}                    without a stateful backend
 
 Replay is strict: a tool with no mock, or no matching case, never runs for real. The agent gets an error
 ToolMessage ("<tool> is not mocked in this test") and the call is recorded in `unmocked`. The harness then
@@ -54,9 +58,14 @@ class NotMocked(Exception):
     pass
 
 
-def _case_matches(case: dict[str, Any], args: dict[str, Any]) -> bool:
+def _case_matches(case: dict[str, Any], args: dict[str, Any], calls: list[dict[str, Any]]) -> bool:
     if not all(args.get(arg) == want for arg, want in (case.get("when") or {}).items()):
         return False
+    # A failed call (a mock that raised, or a tool with no mock) changed nothing, so only successful ones count.
+    for tool, want in (case.get("after") or {}).items():
+        if not any(call["name"] == tool and "result" in call
+                   and all(call["args"].get(arg) == value for arg, value in (want or {}).items()) for call in calls):
+            return False
     # Matched on a value, not an argument name: a mocked tool can't pin its schema, so the model may send the
     # same record id as `post_id` on one run and `id` on the next.
     if "when_any_value" in case:
@@ -95,7 +104,7 @@ class MockTools:
             return shift_dates(self._next_in_sequence(name, mock["sequence"]), self.shift_days)
         if isinstance(mock, dict) and set(mock) == {"cases"}:
             for case in mock["cases"]:
-                if _case_matches(case, args):
+                if _case_matches(case, args, self.calls):
                     return shift_dates(case.get("response"), self.shift_days)
             raise NotMocked(f"{name} is not mocked in this test for arguments {json.dumps(args, sort_keys=True)}")
         return shift_dates(mock, self.shift_days)
