@@ -32,7 +32,7 @@ type Notice = { kind: 'error' | 'success'; text: string } | null;
 type ListStatus = TestStatus | 'queued' | 'running';
 
 const STATUS_DOT: Record<ListStatus, { glyph: string; color: string; label: string }> = {
-  running: { glyph: '◐', color: 'text-secondary animate-spin', label: 'Running now' },
+  running: { glyph: '', color: '', label: 'Running now' },
   queued: { glyph: '◌', color: 'text-tertiary', label: 'Waiting for a free slot' },
   pass: { glyph: '●', color: 'text-success-primary', label: 'Passed every time' },
   fail: { glyph: '●', color: 'text-error-primary', label: 'Something failed every time' },
@@ -45,6 +45,8 @@ const STATUS_DOT: Record<ListStatus, { glyph: string; color: string; label: stri
 function StatusDot({ status, stale = false }: { status: ListStatus; stale?: boolean }) {
   const dot = STATUS_DOT[status];
   const label = stale ? `Out of date. ${dot.label}` : dot.label;
+  // A spun text glyph wobbles (it isn't centred in its own box), so running uses the real spinner.
+  if (status === 'running') return <span className="flex w-3 shrink-0 justify-center" title={label} aria-label={label}><Spinner size="sm" /></span>;
   return <span className={`w-3 shrink-0 text-center font-bold ${dot.color} ${stale ? 'opacity-40' : ''}`} title={label} aria-label={label}>{dot.glyph}</span>;
 }
 

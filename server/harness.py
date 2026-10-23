@@ -86,11 +86,12 @@ def _this_turn(messages: list[BaseMessage], inputs: dict) -> list[BaseMessage]:
     """The messages from the prompt on. Replayed history must not count as the agent's own work.
 
     Found by the prompt's own message rather than by counting history: an agent that summarizes a long thread
-    returns fewer messages than it was given, and a count would then cut into this turn.
+    returns fewer messages than it was given, and a count would then cut into this turn. The message may carry more
+    than the prompt (a hook can append text files to it), so it only has to start with it.
     """
     prompt = inputs["prompt"].strip()
     for index in range(len(messages) - 1, -1, -1):
-        if isinstance(messages[index], HumanMessage) and messages[index].text.strip() == prompt:
+        if isinstance(messages[index], HumanMessage) and messages[index].text.strip().startswith(prompt):
             return messages[index:]
     return messages[len(inputs.get("history") or []):]
 
@@ -100,7 +101,7 @@ def _run_agent(inputs: dict, mocks: MockTools, files: list[Attachment]) -> list[
     extra: dict = {key: inputs[key] for key in ("history", "context") if inputs.get(key)}
     if files:
         if "attachments" not in inspect.signature(hook.run_agent).parameters:
-            raise IncompleteTest("This test hands the agent files, but the hook's run_agent takes no `attachments`.")
+            raise IncompleteTest("This agent can't take files: the hook's run_agent has no `attachments` parameter.")
         extra["attachments"] = files
     return hook.run_agent(inputs["prompt"], mocks, **extra)
 
