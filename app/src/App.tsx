@@ -3,7 +3,7 @@ import { Button } from '@langchain/macaw-components/Button';
 import { Card } from '@langchain/macaw-components/Card';
 import { Spinner } from '@langchain/macaw-components/Spinner';
 import { Text } from '@langchain/macaw-components/Text';
-import { fieldClass, Section, Subsection, TextAreaField, TextField } from './components/fields';
+import { fieldClass, Section, Subsection, TextAreaField, RemoveButton } from './components/fields';
 import { ActionsMenu } from './components/ActionsMenu';
 import { contentHash } from './lib/contentHash';
 import { AssertionDrilldown } from './components/AssertionDrilldown';
@@ -127,7 +127,6 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
   useEffect(() => {
     setDrill(null);
     setHistoryFocus(null);
-    setRenaming(new Set());
     // Advanced (context) opens by itself when the test has context.
     setAdvancedOpen(Boolean(selectedId && drafts[selectedId]?.context.trim()));
   }, [selectedId]);
@@ -176,8 +175,6 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
   const [filePick, setFilePick] = useState(0);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [givenSignal, setGivenSignal] = useState(0);
-  // Assertions whose name field is showing (⋯ › Rename).
-  const [renaming, setRenaming] = useState<Set<string>>(new Set());
   // Suggest assertions on a test imported from a trace (web mode): the test it is for while drafting, then what came of it.
   const [suggesting, setSuggesting] = useState<string | null>(null);
   const [suggestNotice, setSuggestNotice] = useState<Notice>(null);
@@ -260,17 +257,17 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
     patchDraft({ [field]: (draft[field] as { key: string }[]).map((row) => (row.key === key ? withAutoName(field, row, { ...row, ...patch }, patch) : row)) } as Partial<Draft>);
   }
 
-  // An assertion or check that still has its generated name (or none) is renamed as it's written, so nobody has to
-  // invent a feedback key before they can save. A name the expert typed is never touched.
+  // An assertion's or check's name is its feedback key, kept in step with what it says like a slug, so nobody has to
+  // invent one. Only code that passes a name (Rewrite keeps the old key) overrides it.
   function withAutoName(field: string, before: object, after: object, patch: object) {
     if ('name' in patch) return after;
     if (field === 'assertions') {
       const [b, a] = [before as Draft['assertions'][number], after as Draft['assertions'][number]];
-      return !b.name || b.name === slugify(b.assertion) ? { ...a, name: slugify(a.assertion) } : a;
+      return b.assertion !== a.assertion || !b.name ? { ...a, name: slugify(a.assertion) } : a;
     }
     if (field === 'checks') {
-      const [b, a] = [before as Draft['checks'][number], after as Draft['checks'][number]];
-      return !b.name || b.name === autoCheckName(b) || b.name === b.type.replace(/_/g, '-') ? { ...a, name: autoCheckName(a) } : a;
+      const check = after as Draft['checks'][number];
+      return { ...check, name: autoCheckName(check) };
     }
     return after;
   }
@@ -798,15 +795,9 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
                       <span className="flex items-center gap-space-1 pt-space-1">
                         <ResultChip result={summaries[selected.id]?.keys[row.name]} ranAt={summaries[selected.id]?.ranAt ?? ''} stale={selectedStale}
                           onOpen={() => setDrill(drill?.name === row.name ? null : { kind: 'assertion', name: row.name })} />
-                        <ActionsMenu label="Assertion actions" compact items={[
-                          { label: 'Rename', onSelect: () => setRenaming((current) => new Set(current).add(row.key)) },
-                          { label: 'Delete', danger: true, onSelect: () => removeRow('assertions', row.key) },
-                        ]} />
+                        <RemoveButton label="Delete assertion" onClick={() => removeRow('assertions', row.key)} />
                       </span>
                     </div>
-                    {renaming.has(row.key) ? (
-                      <div className="w-64"><TextField label="Name" value={row.name} onChange={(name) => patchRow('assertions', row.key, { name: name.toLowerCase().replace(/[\s_]+/g, '-') })} placeholder="named from the sentence" mono /></div>
-                    ) : null}
                     {assertionHints(row.assertion).map((hint) => <span key={hint} className="text-xs text-tertiary">{hint}</span>)}
                     {drill?.kind === 'assertion' && drill.name === row.name && dataset ? (
                       <AssertionDrilldown datasetId={dataset.id} exampleId={selected.id} testName={draft.name} name={row.name} kind="assertion" onClose={() => setDrill(null)} onAddMock={addMockForGap}

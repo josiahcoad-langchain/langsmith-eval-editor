@@ -64,8 +64,9 @@ A Given / When / Then test editor for an agent, over one LangSmith dataset (defa
   - Given starts collapsed with a one-line summary; earlier messages and files show only once the test has some
     (Add ▾); context is under Advanced (open when non-empty). Mock conditions read "When order_id is …" for one
     string argument; any-argument and after-calls are under "More conditions".
-  - Then: one sentence per row with its chip and ⋯ (Rename, Delete): names stay generated (`slugify`, `autoCheckName`)
-    unless renamed. Code checks collapse to "+ Add code check" until one exists.
+  - Then: one sentence per row with its chip ("3/3 passed") and a trash button. Names (feedback keys) are never shown:
+    they follow the sentence like a slug (`slugify`, `autoCheckName`), and a repeat gets -2 at save. Code checks
+    collapse to "+ Add code check" until one exists.
   - A run that called an unmocked tool shows "A tool had no answer, so this result doesn't count." with Add answer
     (`mockGaps`), and hides "Judge right?" on those repetitions.
   - Errors read as `friendlyError` (401 → "Couldn't reach the model (API key rejected)", else "The run failed");

@@ -10,8 +10,8 @@ export function ResultChip({ result, ranAt, stale = null, onOpen }: { result?: K
   const label = `${stale ? 'Out of date. ' : ''}Newest run${ranAt ? ` (${shortDate(ranAt)})` : ''}: passed ${result.passed} of ${result.n}. Click for details.`;
   return (
     <button type="button" onClick={onOpen} title={label} aria-label={label}
-      className={`shrink-0 rounded-sm px-space-2 py-space-1 font-mono text-xs font-medium ${tone} ${stale ? 'opacity-40' : ''}`}>
-      {result.passed}/{result.n} {result.n === 1 ? "run" : "runs"}
+      className={`shrink-0 rounded-sm px-space-2 py-space-1 text-xs font-medium ${tone} ${stale ? 'opacity-40' : ''}`}>
+      {result.passed}/{result.n} passed
     </button>
   );
 }

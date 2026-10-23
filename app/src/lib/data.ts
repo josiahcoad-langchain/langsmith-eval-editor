@@ -322,14 +322,14 @@ export function toPayload(example: Example, draft: Draft): { payload?: Pick<Exam
   if (!draft.name.trim()) return { error: 'Give the test a name.' };
   if (!draft.prompt.trim()) return { error: 'Write the prompt (When).' };
   // A fully blank row (new and imported tests start with one) is left out rather than blocking the save.
-  const assertions = draft.assertions.filter((row) => row.name.trim() || row.assertion.trim());
-  if (assertions.some((row) => !row.name.trim())) return { error: 'Every assertion needs a name.' };
-  if (draft.checks.some((check) => !check.name.trim())) return { error: 'Every check needs a name.' };
-  // Assertions and checks share one namespace: each name becomes a LangSmith feedback key.
-  const names = [...assertions.map((row) => row.name.trim()), ...draft.checks.map((check) => check.name.trim())];
-  const dupe = names.find((name, index) => names.indexOf(name) !== index);
-  if (dupe) return { error: `Two assertions or checks are named "${dupe}".` };
-  for (const check of draft.checks) {
+  // Names are feedback keys, made from the sentence (or the check) like a slug; a repeat gets -2, -3 instead of an error.
+  const taken = new Set<string>();
+  const unique = (name: string) => { let out = name; for (let n = 2; taken.has(out); n++) out = `${name}-${n}`; taken.add(out); return out; };
+  // A blank row (new and imported tests start with one) is left out rather than blocking the save.
+  const assertions = draft.assertions.filter((row) => row.assertion.trim())
+    .map((row) => ({ ...row, name: unique(row.name.trim() || slugify(row.assertion) || 'assertion') }));
+  const checks = draft.checks.map((check) => ({ ...check, name: unique(check.name.trim() || autoCheckName(check)) }));
+  for (const check of checks) {
     const problem = checkProblem(check);
     if (problem) return { error: `Check "${check.name}": ${problem}` };
   }
@@ -387,7 +387,7 @@ export function toPayload(example: Example, draft: Draft): { payload?: Pick<Exam
       outputs: {
         ...outputs,
         assertions: assertions.map((row) => ({ name: row.name.trim(), assertion: row.assertion })),
-        ...(draft.checks.length ? { checks: draft.checks.map(checkPayload) } : {}),
+        ...(checks.length ? { checks: checks.map(checkPayload) } : {}),
       },
       metadata: { ...example.metadata, name: draft.name.trim(), description: draft.description, dataset_split: draft.splits },
     },

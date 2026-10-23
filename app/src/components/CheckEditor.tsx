@@ -1,5 +1,4 @@
-import { useState, type ReactNode } from 'react';
-import { ActionsMenu } from './ActionsMenu';
+import type { ReactNode } from 'react';
 import { RemoveButton, TextAreaField, TextField, fieldClass } from './fields';
 import { CHECK_LABELS, CHECK_TYPES, checkProblem, type Check } from '../lib/data';
 
@@ -46,12 +45,11 @@ function ToolGroups({ groups, tools, anyOf, onChange }: { groups: string[][]; to
   );
 }
 
-// One code check: a type and that type's params. Its name (the feedback key) is generated; ⋯ › Rename edits it.
+// One code check: a type and that type's params. Its name (the feedback key) is generated from it.
 export function CheckEditor({ check, tools, onChange, onRemove, result }: {
   check: Check; tools: string[]; onChange: (patch: Partial<Check>) => void; onRemove: () => void; result?: ReactNode;
 }) {
   const problem = checkProblem(check);
-  const [renaming, setRenaming] = useState(false);
   const max = <TextField label="Max" value={check.max} onChange={(value) => onChange({ max: value })} placeholder="3" mono />;
   return (
     <div className="flex flex-col gap-space-2 rounded-md border border-default bg-surface-level-1 p-space-3">
@@ -64,14 +62,8 @@ export function CheckEditor({ check, tools, onChange, onRemove, result }: {
         </select>
         <div className="flex-1" />
         {result}
-        <ActionsMenu label="Check actions" compact items={[
-          { label: 'Rename', onSelect: () => setRenaming(!renaming) },
-          { label: 'Delete', danger: true, onSelect: onRemove },
-        ]} />
+        <RemoveButton label="Delete check" onClick={onRemove} />
       </div>
-      {renaming ? (
-        <div className="w-64"><TextField label="Name" value={check.name} onChange={(name) => onChange({ name: name.toLowerCase().replace(/[\s_]+/g, '-') })} placeholder="check-name" mono /></div>
-      ) : null}
       {check.type === 'custom' || !(CHECK_TYPES as readonly string[]).includes(check.type) ? <span className="text-xs text-tertiary">{CUSTOM_HINT}</span> : null}
       {check.type === 'must_call' || check.type === 'must_not_call' ? (
         <ToolGroups groups={check.groups} tools={tools} anyOf={check.type === 'must_call'} onChange={(groups) => onChange({ groups })} />
