@@ -102,3 +102,14 @@ def test_after_with_empty_arguments_matches_any_call_to_that_tool():
     assert mocks.call("status", {}, "c1").content == "pending"
     mocks.call("ship", {"order": "A1"}, "c2")
     assert mocks.call("status", {}, "c3").content == "shipped"
+
+
+def test_dates_written_in_an_assertion_move_with_the_mocks():
+    from mocks import shift_text
+    # Given an assertion written two days before today's run
+    text = "It gives October 24, 2026 (2026-10-24), not Oct 30 or 31 December 2026."
+    # Then every date in it moves two days, in its own format
+    assert shift_text(text, 2, "2026-10-21") == "It gives October 26, 2026 (2026-10-26), not Nov 1 or 2 January 2027."
+    # And numbers that aren't dates stay put
+    assert shift_text("Refund $649 for order A1003 within 24 hours.", 2) == "Refund $649 for order A1003 within 24 hours."
+    assert shift_text("anything", 0) == "anything"

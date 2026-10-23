@@ -668,6 +668,19 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
     testFiles(selected).length ? `${testFiles(selected).length} file${testFiles(selected).length === 1 ? '' : 's'}` : '',
   ].filter(Boolean).join(' · ') || 'Nothing set up yet' : '';
 
+  // A run moves the answers' dates forward by the days since the test was recorded (mocks.py), so the first date
+  // here is shown as it will run today, e.g. "2026-10-24 runs as 2026-10-26".
+  const dateShift = (() => {
+    const recorded = selected ? text(selected.inputs.recorded_on) : '';
+    const first = draft ? JSON.stringify(draft.mockTools.map((mock) => [mock.response, mock.cases])).match(/\d{4}-\d{2}-\d{2}/)?.[0] : undefined;
+    if (!recorded || !first) return '';
+    const day = 86_400_000;
+    const now = new Date();  // the server's date.today() is local, so today here is too
+    const days = Math.round((Date.UTC(now.getFullYear(), now.getMonth(), now.getDate()) - Date.parse(recorded)) / day);
+    const moved = new Date(Date.parse(first) + days * day).toISOString().slice(0, 10);
+    return days > 0 && !Number.isNaN(Date.parse(first)) ? `${first} runs as ${moved}` : '';
+  })();
+
   const fromTrace = selected ? Boolean(text(selected.metadata.source_trace_id)) : false;
   const hasSource = selected ? Boolean(text(selected.metadata.source_output)) || Array.isArray(selected.metadata.source_feedback) : false;
   const statusLine = built?.error ? `Not saved: ${built.error}` : notice?.text ?? runStatus?.text ?? (saving ? 'Saving…' : '');
@@ -745,8 +758,8 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
               <Section title="Given" summary={givenSummary} defaultOpen={false} openSignal={givenSignal}>
                 <Subsection title="Tool answers"
                   hint={<span title={text(selected.inputs.recorded_on)
-                    ? `Recorded ${text(selected.inputs.recorded_on)}. On each run, dates in these answers move forward by the days since then, so the data stays as fresh as it was that day.`
-                    : 'A call to a tool with no answer here makes the run not count.'}>What each tool returns.</span>}>
+                    ? `Recorded ${text(selected.inputs.recorded_on)}. On each run, dates in these answers and in the assertions move forward by the days since then, so the data stays as fresh as it was that day.`
+                    : 'A call to a tool with no answer here makes the run not count.'}>What each tool returns.{dateShift ? ` Dates move with today: ${dateShift}.` : ''}</span>}>
                   {draft.mockTools.length === 0 ? <Text variant="xs" color="tertiary">None yet.</Text> : null}
                   {draft.mockTools.map((mock) => (
                     <MockToolEditor key={mock.key} mock={mock} tools={tools} onChange={(patch) => patchRow('mockTools', mock.key, patch)}

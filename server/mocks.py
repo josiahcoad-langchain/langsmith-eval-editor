@@ -22,7 +22,8 @@ fails the whole run as an incomplete test (an error, not a grade), so a test can
 mocks everything the agent touched.
 
 Dates in responses (strings that start with YYYY-MM-DD) move forward by the days between `recorded_on` and
-today, so recorded data looks exactly as fresh on every run as it did the day it was recorded.
+today, so recorded data looks exactly as fresh on every run as it did the day it was recorded. Assertions move
+with them (`shift_text`), so "It gives the delivery date of October 24" still means the date the tool returned.
 """
 
 from __future__ import annotations
@@ -52,6 +53,52 @@ def shift_dates(value: Any, days: int) -> Any:
         except ValueError:
             return value
     return value
+
+
+_MONTHS = ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october",
+           "november", "december"]
+_MONTH = r"(?P<month>" + "|".join(f"{m[:3]}(?:{m[3:]})?" for m in _MONTHS) + r")\.?"
+# 2026-10-24 · October 24, 2026 · Oct 24 · 24 October 2026
+_TEXT_DATE = re.compile(
+    r"\b(?P<iso>\d{4}-\d{2}-\d{2})\b"
+    rf"|\b{_MONTH} (?P<day>\d{{1,2}})(?:st|nd|rd|th)?(?:, (?P<year>\d{{4}}))?\b"
+    rf"|\b(?P<day2>\d{{1,2}}) {_MONTH.replace('month', 'month2')} (?P<year2>\d{{4}})\b", re.I)
+
+
+def shift_days(recorded_on: str | None, today: date | None = None) -> int:
+    return ((today or date.today()) - date.fromisoformat(recorded_on)).days if recorded_on else 0
+
+
+def shift_text(text: str, days: int, recorded_on: str | None = None) -> str:
+    """Moves the dates written in free text (an assertion) by `days`, keeping each one's own format. A date
+    without a year ("Oct 24") is read as in the year the test was recorded."""
+    if not days:
+        return text
+
+    def move(match: re.Match) -> str:
+        if match["iso"]:
+            try:
+                return str(date.fromisoformat(match["iso"]) + timedelta(days=days))
+            except ValueError:
+                return match[0]
+        month_word = match["month"] or match["month2"]
+        year = match["year"] or match["year2"]
+        try:
+            when = date(int(year or (recorded_on or str(date.today()))[:4]), _month(month_word),
+                        int(match["day"] or match["day2"])) + timedelta(days=days)
+        except ValueError:
+            return match[0]
+        name = _MONTHS[when.month - 1].capitalize()
+        name = name[:3] + ("." if month_word.endswith(".") else "") if len(month_word.rstrip(".")) == 3 else name
+        if match["day2"]:
+            return f"{when.day} {name} {when.year}"
+        return f"{name} {when.day}" + (f", {when.year}" if year else "")
+
+    return _TEXT_DATE.sub(move, text)
+
+
+def _month(word: str) -> int:
+    return next(index for index, name in enumerate(_MONTHS, 1) if name.startswith(word.rstrip(".").lower()))
 
 
 class NotMocked(Exception):
@@ -86,8 +133,7 @@ class MockTools:
 
     def __init__(self, mocks: dict[str, Any] | None, recorded_on: str | None = None, today: date | None = None):
         self.mocks = mocks or {}
-        recorded = date.fromisoformat(recorded_on) if recorded_on else None
-        self.shift_days = ((today or date.today()) - recorded).days if recorded else 0
+        self.shift_days = shift_days(recorded_on, today)
         self.calls: list[dict[str, Any]] = []
         self.unmocked: list[dict[str, Any]] = []
         # Tool calls from one model turn run in parallel threads; a sequence picks its response by counting calls.

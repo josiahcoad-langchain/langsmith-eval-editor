@@ -47,7 +47,7 @@ from checks import run_checks  # noqa: E402
 from content_hash import content_hash  # noqa: E402
 from evidence import build_evidence  # noqa: E402
 from files import AgentRun, Attachment, FileProblem, describe, materialize  # noqa: E402
-from mocks import MockTools  # noqa: E402
+from mocks import MockTools, shift_text  # noqa: E402
 from suite import Repetition, is_proposal  # noqa: E402
 
 hook = load_hook()  # after load_dotenv: the agent reads its model settings at import
@@ -130,6 +130,9 @@ def target(inputs: dict, attachments: dict | None = None) -> dict:
                "transcript": _transcript(turn)}
     if made:
         outputs["files"] = describe(made)
+    if mocks.shift_days:
+        # How far this run moved the mocks' dates, so grading (now or a re-grade later) moves the assertions' too.
+        outputs["date_shift_days"] = mocks.shift_days
     return outputs
 
 
@@ -194,11 +197,18 @@ def _judge_all(tests: list[dict], evidence: dict) -> list[Grade]:
     return _judge().with_structured_output(Grades, method="json_schema").invoke(prompt).grades
 
 
+def as_run(assertion: dict, inputs: dict, outputs: dict) -> dict:
+    """The assertion as this run saw the world: the run moved the mocks' dates forward, so its dates move too."""
+    days = outputs.get("date_shift_days") or 0
+    return {"name": assertion["name"], "assertion": shift_text(assertion.get("assertion") or "", days, inputs.get("recorded_on"))}
+
+
 def assertions(inputs: dict, outputs: dict, reference_outputs: dict) -> dict:
     """Grades every assertion in one call; each becomes its own feedback key."""
     tests = [t for t in reference_outputs.get("assertions") or [] if t.get("name")]
     if not tests or _errored(outputs):
         return {"results": []}
+    tests = [as_run(t, inputs, outputs) for t in tests]
     evidence = build_evidence(inputs, outputs, EVIDENCE_LIMIT)
     # A hook may grade assertions its own way, e.g. with a cheap yes/no classifier that hands only the cases it
     # is unsure of to a chat model. It returns one {name, passed, reason} per assertion.
