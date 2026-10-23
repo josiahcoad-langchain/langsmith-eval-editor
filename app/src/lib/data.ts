@@ -931,6 +931,8 @@ export function friendlyError(error: string) {
   if (/\b401\b|invalid x-api-key|authentication_error|api key/i.test(error)) return "Couldn't reach the model (API key rejected)";
   if (/\b429\b|rate.?limit/i.test(error)) return 'The model was busy (rate limited)';
   if (/no mock answered|is not mocked/i.test(error)) return 'A tool had no answer';
+  if (/no `attachments`/.test(error)) return "This agent can't take files";
+  if (/has no attachment by that name|changed since the test listed it/.test(error)) return 'A file is missing or changed: upload it again';
   if (/timed? ?out|timeout/i.test(error)) return 'The run timed out';
   return 'The run failed';
 }

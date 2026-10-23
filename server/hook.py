@@ -10,6 +10,10 @@ experiment.
 passed only when the test sets them. Return the history messages first, then this turn's, so the harness can
 grade only what the agent did now. This demo agent has no use for `context`.
 
+`attachments` (the test's files, each an `Attachment(name, mime_type, path)` to a fresh local copy) is passed only
+when the test has files. This demo puts them in the user's message next to the prompt: images and PDFs as content
+blocks, text files inline. An agent that reads files from a sandbox would copy them there instead.
+
 `TOOL_NAMES` feeds the editor's "Add mock" dropdown and decides which tool runs Import turns into mocks.
 
 For a LangChain/LangGraph agent, pass `mocks.middleware()` into `create_agent(..., middleware=[...])`. For any
@@ -22,22 +26,39 @@ To keep a hook in another repo, set EVAL_HOOK to its module path (see agent_hook
 
 from __future__ import annotations
 
+import base64
 from typing import Any
 
 from langchain_core.messages import BaseMessage
 
 from demo_agent import INSTRUCTIONS, TOOLS, build_agent
+from files import Attachment
 from mocks import MockTools
 
 TOOL_NAMES = [t.name for t in TOOLS]
 
 
 def run_agent(prompt: str, mocks: MockTools, history: list[dict] | None = None,
-              context: dict[str, Any] | None = None) -> list[BaseMessage]:
+              context: dict[str, Any] | None = None, attachments: list[Attachment] | None = None) -> list[BaseMessage]:
     agent = build_agent(middleware=[mocks.middleware()])
-    messages = [*(history or []), {"role": "user", "content": prompt}]
+    content = [{"type": "text", "text": prompt}, *(_block(file) for file in attachments or [])] if attachments else prompt
+    messages = [*(history or []), {"role": "user", "content": content}]
     result = agent.invoke({"messages": messages})
     return result["messages"]
+
+
+TEXT_TYPES = ("application/json", "application/xml", "application/yaml", "application/csv")
+
+
+def _block(file: Attachment) -> dict:
+    """One file as a LangChain content block the model can read."""
+    data = file.path.read_bytes()
+    if file.mime_type.startswith("image/") or file.mime_type == "application/pdf":
+        kind = "image" if file.mime_type.startswith("image/") else "file"
+        return {"type": kind, "base64": base64.b64encode(data).decode(), "mime_type": file.mime_type}
+    if file.mime_type.startswith("text/") or file.mime_type in TEXT_TYPES:
+        return {"type": "text", "text": f"\n\nAttached file {file.name}:\n{data.decode(errors='replace')}"}
+    return {"type": "text", "text": f"\n\nAttached file {file.name} ({file.mime_type}) can't be shown to you."}
 
 
 def agent_context() -> dict:

@@ -75,3 +75,15 @@ def test_a_hook_that_cant_take_files_fails_a_test_that_has_them(monkeypatch):
 def test_no_output_file_fails_must_output_file():
     results = run_checks({"files": []}, [{"name": "made-a-video", "type": "must_output_file", "mime": "video/"}])
     assert results[0]["score"] == 0
+
+
+def test_the_demo_hook_puts_files_in_the_users_message(tmp_path):
+    # Given a text file and an image
+    import hook
+    (tmp_path / "note.txt").write_text("Order A1001")
+    (tmp_path / "photo.png").write_bytes(b"\x89PNG")
+    # Then the text is inlined and the image becomes an image block
+    text = hook._block(Attachment(name="note.txt", mime_type="text/plain", path=tmp_path / "note.txt"))
+    image = hook._block(Attachment(name="photo.png", mime_type="image/png", path=tmp_path / "photo.png"))
+    assert text["type"] == "text" and "Order A1001" in text["text"]
+    assert image == {"type": "image", "base64": "iVBORw==", "mime_type": "image/png"}
