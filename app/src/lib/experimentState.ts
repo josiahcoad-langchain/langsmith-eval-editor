@@ -37,10 +37,21 @@ export function statsFromRuns(runs: Experiment[]): { feedback_stats: Record<stri
   return { feedback_stats, error_rate: runs.length ? errored / runs.length : 0 };
 }
 
+// Grades land a little after the agent runs end. An experiment that ended this recently with none yet is still being
+// graded, and showing the run before it in the meantime made a fresh result read as the old one.
+export const GRADING_FOR_AT_MOST_MS = 2 * 60 * 1000;
+
 export function isRunning(experiment: Experiment, now: number): boolean {
-  if (isResult(experiment) || experiment.end_time) return false;
-  // LangSmith writes start_time without a zone, and it is UTC; Date.parse would read it as local time.
-  const raw = String(experiment.start_time ?? '');
-  const started = Date.parse(/[zZ]|[+-]\d\d:?\d\d$/.test(raw) ? raw : `${raw}Z`);
+  if (isResult(experiment)) return false;
+  if (experiment.end_time) {
+    const ended = utc(String(experiment.end_time));
+    return !Number.isNaN(ended) && now - ended < GRADING_FOR_AT_MOST_MS;
+  }
+  const started = utc(String(experiment.start_time ?? ''));
   return !Number.isNaN(started) && now - started < RUNNING_FOR_AT_MOST_MS;
+}
+
+// LangSmith writes times without a zone, and they are UTC; Date.parse would read them as local time.
+function utc(raw: string) {
+  return Date.parse(/[zZ]|[+-]\d\d:?\d\d$/.test(raw) ? raw : `${raw}Z`);
 }

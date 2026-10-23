@@ -146,7 +146,8 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
   }, [dataset, selectedId, selectedStatus, selectedName]);
 
   // Which tests are queued or running. Polled fast while anything is in flight; when a test finishes, the dots
-  // are re-read so its new result shows without waiting for the 30s refresh.
+  // are re-read so its new result shows without waiting for the 30s refresh. Grades land a few seconds after the
+  // run ends, so they're read again at 5s and 15s: one read at the finish showed the previous run's result.
   useEffect(() => {
     if (!isWeb()) return;
     let cancelled = false;
@@ -154,7 +155,9 @@ export function App({ metadata }: { data: unknown; metadata?: RenderMetadata }) 
     const poll = async () => {
       const next = await fetchActiveRuns().catch(() => previous);
       if (cancelled) return;
-      if (Object.keys(previous).some((id) => !(id in next))) setStatusTick((tick) => tick + 1);
+      if (Object.keys(previous).some((id) => !(id in next))) {
+        for (const wait of [0, 5000, 15000]) window.setTimeout(() => { if (!cancelled) setStatusTick((tick) => tick + 1); }, wait);
+      }
       previous = next;
       setActiveRuns(next);
     };

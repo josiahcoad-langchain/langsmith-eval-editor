@@ -71,3 +71,12 @@ def test_an_errored_run_counts_toward_the_error_rate():
     out = json.loads(subprocess.run(["node", "--experimental-strip-types", "--no-warnings", "--input-type=module", "-e", script],
                                     capture_output=True, text=True, check=True).stdout)
     assert out["error_rate"] == 0.5 and out["feedback_stats"]["a"]["max"] == 0
+
+
+def test_an_experiment_that_just_ended_without_grades_is_still_grading():
+    # Given an experiment that ended a minute ago, and one that ended an hour ago, neither with grades
+    just = {"start_time": "2026-10-17T19:18:00", "end_time": "2026-10-17T19:19:00", "error_rate": 0, "feedback_stats": {}}
+    old = {"start_time": "2026-10-17T18:18:00", "end_time": "2026-10-17T18:19:00", "error_rate": 0, "feedback_stats": {}}
+    # Then the first is still being graded, and the second is not running
+    assert _ts(f"isRunning(e, Date.parse({json.dumps(NOW)}))", just) is True
+    assert _ts(f"isRunning(e, Date.parse({json.dumps(NOW)}))", old) is False
