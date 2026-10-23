@@ -58,3 +58,18 @@ def test_a_real_bug_in_the_grader_is_not_retried(monkeypatch):
     with pytest.raises(KeyError):
         harness.assertions({}, {"transcript": [], "answer": "hi"}, {"assertions": [{"name": "a", "assertion": "x"}]})
     assert len(calls) == 1
+
+
+def test_a_test_runs_as_of_the_day_it_was_recorded(monkeypatch):
+    from datetime import date
+    from types import SimpleNamespace
+
+    # Given a hook that takes `today`, and one that doesn't
+    seen = []
+    monkeypatch.setattr(harness, "hook", SimpleNamespace(run_agent=lambda prompt, mocks, today=None: seen.append(today) or []))
+    harness.target({"prompt": "Where is my order?", "recorded_on": "2026-10-03"})
+    monkeypatch.setattr(harness, "hook", SimpleNamespace(run_agent=lambda prompt, mocks: []))
+    harness.target({"prompt": "Where is my order?", "recorded_on": "2026-10-03"})
+
+    # Then the first is handed the recording day, and the second still runs
+    assert seen == [date(2026, 10, 3)]

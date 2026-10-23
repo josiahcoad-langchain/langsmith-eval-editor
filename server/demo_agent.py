@@ -67,8 +67,10 @@ def issue_refund(order_id: str, amount: float, reason: str) -> dict:
 TOOLS = [get_order, get_shipping_status, issue_refund]
 
 
-def build_agent(middleware=()):
-    return create_agent(MODEL, tools=TOOLS, system_prompt=INSTRUCTIONS, middleware=list(middleware))
+def build_agent(middleware=(), today: date | None = None):
+    # The agent learns the date from its prompt, so a test can run it as of the day it was recorded.
+    prompt = f"{INSTRUCTIONS}\n\nToday is {(today or date.today()).strftime('%A, %B %-d, %Y')}."
+    return create_agent(MODEL, tools=TOOLS, system_prompt=prompt, middleware=list(middleware))
 
 
 if __name__ == "__main__":

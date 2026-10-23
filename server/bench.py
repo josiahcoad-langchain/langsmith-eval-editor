@@ -179,7 +179,7 @@ def _grade_all(targets: list[dict[str, Any]], judges: dict[str, Any], times: int
         if assertion is None:  # a code check, or an assertion since renamed
             continue
         evidence = build_evidence(run.inputs or {}, run.outputs or {}, harness.EVIDENCE_LIMIT)
-        prepared.append((target, harness.as_run(assertion, run.inputs or {}, run.outputs or {}), evidence, harness.test_name(example)))
+        prepared.append((target, assertion, evidence, harness.test_name(example)))
 
     def grade(job: tuple[int, str]) -> tuple[bool | None, float]:
         index, judge = job

@@ -1,74 +1,63 @@
-from datetime import date
-
-from mocks import MockTools, shift_dates
-
-TODAY = date(2026, 10, 16)
+from mocks import MockTools
 
 
 def test_single_response_for_any_arguments():
-    mocks = MockTools({"get_order": {"id": "A1"}}, today=TODAY)
+    mocks = MockTools({"get_order": {"id": "A1"}})
     message = mocks.call("get_order", {"order_id": "anything"}, "c1")
     assert message.content == '{"id": "A1"}' and message.status == "success"
     assert mocks.unmocked == []
 
 
 def test_cases_match_on_a_subset_of_arguments_first_match_wins():
-    mocks = MockTools({"ship": {"cases": [{"when": {"n": "1"}, "response": "one"}, {"response": "other"}]}}, today=TODAY)
+    mocks = MockTools({"ship": {"cases": [{"when": {"n": "1"}, "response": "one"}, {"response": "other"}]}})
     assert mocks.call("ship", {"n": "1", "extra": True}, "c1").content == "one"
     assert mocks.call("ship", {"n": "2"}, "c2").content == "other"
 
 
 def test_raise_fails_the_call_but_counts_as_mocked():
-    mocks = MockTools({"refund": {"raise": "503"}}, today=TODAY)
+    mocks = MockTools({"refund": {"raise": "503"}})
     message = mocks.call("refund", {}, "c1")
     assert message.status == "error" and message.content == "503"
     assert mocks.unmocked == []
 
 
 def test_unmocked_tool_and_unmatched_case_are_strict_failures():
-    mocks = MockTools({"ship": {"cases": [{"when": {"n": "1"}, "response": "one"}]}}, today=TODAY)
+    mocks = MockTools({"ship": {"cases": [{"when": {"n": "1"}, "response": "one"}]}})
     assert mocks.call("refund", {"id": "A1"}, "c1").status == "error"
     assert "not mocked" in mocks.call("ship", {"n": "9"}, "c2").content
     assert [call["name"] for call in mocks.unmocked] == ["refund", "ship"]
 
 
 def test_sequence_answers_each_call_in_turn_then_repeats_the_last():
-    mocks = MockTools({"generate": {"sequence": ["img-1", "img-2"]}}, today=TODAY)
+    mocks = MockTools({"generate": {"sequence": ["img-1", "img-2"]}})
     assert [mocks.call("generate", {}, f"c{i}").content for i in range(3)] == ["img-1", "img-2", "img-2"]
 
 
 def test_sequence_counts_per_tool():
-    mocks = MockTools({"a": {"sequence": ["a1", "a2"]}, "b": {"sequence": ["b1", "b2"]}}, today=TODAY)
+    mocks = MockTools({"a": {"sequence": ["a1", "a2"]}, "b": {"sequence": ["b1", "b2"]}})
     assert [mocks.call(n, {}, "c").content for n in ("a", "b", "a")] == ["a1", "b1", "a2"]
 
 
 def test_when_any_value_matches_the_value_under_any_argument_name():
     # Parallel calls carry the record id as `post_id` on one run and `id` on the next, so match on the value.
     cases = [{"when_any_value": "P1", "response": {"raise": "400 published"}}, {"response": "saved"}]
-    mocks = MockTools({"update_post": {"cases": cases}}, today=TODAY)
+    mocks = MockTools({"update_post": {"cases": cases}})
     assert mocks.call("update_post", {"post_id": "P1"}, "c1").status == "error"
     assert mocks.call("update_post", {"id": "P1", "caption": "x"}, "c2").status == "error"
     assert mocks.call("update_post", {"id": "P2"}, "c3").content == "saved"
 
 
-def test_dates_shift_by_days_since_recording():
-    mocks = MockTools({"ship": {"eta": "2026-10-06", "at": "2026-10-01T09:00Z", "id": "2026-13-99"}},
-                      recorded_on="2026-10-03", today=TODAY)
-    assert mocks.respond("ship", {}) == {"eta": "2026-10-19", "at": "2026-10-14T09:00Z", "id": "2026-13-99"}
-    assert shift_dates(["2026-01-01"], 0) == ["2026-01-01"]
-
-
 def test_sequence_is_safe_under_parallel_tool_calls():
     from concurrent.futures import ThreadPoolExecutor
 
-    mocks = MockTools({"gen": {"sequence": [f"img-{i}" for i in range(20)]}}, today=TODAY)
+    mocks = MockTools({"gen": {"sequence": [f"img-{i}" for i in range(20)]}})
     with ThreadPoolExecutor(max_workers=20) as pool:
         replies = list(pool.map(lambda i: mocks.call("gen", {}, f"c{i}").content, range(20)))
     assert sorted(replies) == sorted(f"img-{i}" for i in range(20))
 
 
 def test_empty_sequence_is_unmocked_not_a_crash():
-    mocks = MockTools({"gen": {"sequence": []}}, today=TODAY)
+    mocks = MockTools({"gen": {"sequence": []}})
     assert mocks.call("gen", {}, "c1").status == "error"
     assert mocks.unmocked == [{"name": "gen", "args": {}}]
 
@@ -79,7 +68,7 @@ def _write_then_read_mocks():
         "get_post": {"cases": [
             {"after": {"update_post": {"post_id": "P1"}}, "response": {"caption": "Hi"}},
             {"response": {"caption": "old text"}}]},
-    }, today=TODAY)
+    })
 
 
 def test_after_answers_a_read_differently_once_the_write_happened():
@@ -98,18 +87,8 @@ def test_after_needs_the_listed_arguments_and_a_successful_call():
 
 
 def test_after_with_empty_arguments_matches_any_call_to_that_tool():
-    mocks = MockTools({"ship": "ok", "status": {"cases": [{"after": {"ship": {}}, "response": "shipped"}, {"response": "pending"}]}}, today=TODAY)
+    mocks = MockTools({"ship": "ok", "status": {"cases": [{"after": {"ship": {}}, "response": "shipped"}, {"response": "pending"}]}})
     assert mocks.call("status", {}, "c1").content == "pending"
     mocks.call("ship", {"order": "A1"}, "c2")
     assert mocks.call("status", {}, "c3").content == "shipped"
 
-
-def test_dates_written_in_an_assertion_move_with_the_mocks():
-    from mocks import shift_text
-    # Given an assertion written two days before today's run
-    text = "It gives October 24, 2026 (2026-10-24), not Oct 30 or 31 December 2026."
-    # Then every date in it moves two days, in its own format
-    assert shift_text(text, 2, "2026-10-21") == "It gives October 26, 2026 (2026-10-26), not Nov 1 or 2 January 2027."
-    # And numbers that aren't dates stay put
-    assert shift_text("Refund $649 for order A1003 within 24 hours.", 2) == "Refund $649 for order A1003 within 24 hours."
-    assert shift_text("anything", 0) == "anything"

@@ -10,6 +10,9 @@ experiment.
 passed only when the test sets them. Return the history messages first, then this turn's, so the harness can
 grade only what the agent did now. This demo agent has no use for `context`.
 
+`today` is the day the test runs as of (its `recorded_on`), passed when the test has one. Give it to the agent
+instead of reading the real clock, so the mocks' dates mean what they meant the day the test was recorded.
+
 `attachments` (the test's files, each an `Attachment(name, mime_type, path)` to a fresh local copy) is passed only
 when the test has files. This demo puts them in the user's message next to the prompt: images and PDFs as content
 blocks, text files inline. An agent that reads files from a sandbox would copy them there instead.
@@ -27,6 +30,7 @@ To keep a hook in another repo, set EVAL_HOOK to its module path (see agent_hook
 from __future__ import annotations
 
 import base64
+from datetime import date
 from typing import Any
 
 from langchain_core.messages import BaseMessage
@@ -39,8 +43,9 @@ TOOL_NAMES = [t.name for t in TOOLS]
 
 
 def run_agent(prompt: str, mocks: MockTools, history: list[dict] | None = None,
-              context: dict[str, Any] | None = None, attachments: list[Attachment] | None = None) -> list[BaseMessage]:
-    agent = build_agent(middleware=[mocks.middleware()])
+              context: dict[str, Any] | None = None, attachments: list[Attachment] | None = None,
+              today: date | None = None) -> list[BaseMessage]:
+    agent = build_agent(middleware=[mocks.middleware()], today=today)
     content = [{"type": "text", "text": prompt}, *(_block(file) for file in attachments or [])] if attachments else prompt
     messages = [*(history or []), {"role": "user", "content": content}]
     result = agent.invoke({"messages": messages})
