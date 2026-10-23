@@ -59,15 +59,32 @@ function useColorMode() {
   return mode;
 }
 
+// The agent's commit, re-read every 30s: a server restarted on new code runs on a new commit, and a page still
+// holding the old one would call those fresh results out of date.
+function useAgentCommits(initial: Config) {
+  const [commits, setCommits] = useState({ agentCommit: initial.agentCommit, sameAgentCommits: initial.sameAgentCommits });
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      fetch('/api/config').then((response) => response.json() as Promise<Config>)
+        .then((next) => setCommits((current) => current.agentCommit === next.agentCommit ? current
+          : { agentCommit: next.agentCommit, sameAgentCommits: next.sameAgentCommits }))
+        .catch(() => {});
+    }, 30000);
+    return () => window.clearInterval(timer);
+  }, []);
+  return commits;
+}
+
 function Root({ config }: { config: Config }) {
   const mode = useColorMode();
+  const { agentCommit, sameAgentCommits } = useAgentCommits(config);
   useEffect(() => {
     document.documentElement.classList.toggle('dark', mode === 'dark');
   }, [mode]);
   return (
     <HostTheme mode={mode}>
       <ErrorBoundary>
-        <App data={{}} metadata={{ mode, workspaceId: config.workspaceId, host: config.host, agentCommit: config.agentCommit, sameAgentCommits: config.sameAgentCommits }} />
+        <App data={{}} metadata={{ mode, workspaceId: config.workspaceId, host: config.host, agentCommit, sameAgentCommits }} />
       </ErrorBoundary>
     </HostTheme>
   );
