@@ -1,6 +1,6 @@
 # Eval editor: context
 
-A Given / When / Assert test editor for an agent, over one LangSmith dataset (default `eval-editor-demo`). The same
+A Given / When / Then test editor for an agent, over one LangSmith dataset (default `eval-editor-demo`). The same
 `src/App.tsx` runs as a web app (`src/web.tsx`, served by `server/main.py`) and as a LangSmith custom app
 (`src/entry.tsx`). See the repo README for setup.
 
@@ -22,9 +22,9 @@ A Given / When / Assert test editor for an agent, over one LangSmith dataset (de
   - `HistoryEditor`: collapsed turn list, uncontrolled while editing.
   - `ResultsPanel`: polls every 15 s, groups repetitions by experiment.
   - `ResultChip`: per assertion and check.
-  - `LastRun`: the header line.
-  - `TracePreview`, `RunCompare`, `ToolCalls` (shared by the drill-down, compare and preview).
-  - `ActionsMenu`: the "⋯" menus.
+  - `LastRun`: "Passed 3/3 · Oct 16" in the top bar; details in its tooltip.
+  - `RunCompare`, `ToolCalls` (shared by the drill-down and compare), `ErrorDetails` (raw error + traceback under "Details").
+  - `ActionsMenu`: the "⋯" menus and Given's "Add ▾".
   - `fields`: `TextAreaField` with `maxRows` grows, then scrolls.
 
 ## Data shape
@@ -36,7 +36,7 @@ A Given / When / Assert test editor for an agent, over one LangSmith dataset (de
   - `recorded_on?`
   - `mock_tools`: `{tool: response | {"cases": [{when?, when_any_value?, response}]} | {"sequence": [...]} | {"raise": msg}}`
 - `outputs`: `assertions` (`[{name, assertion}]`) and `checks?` (`[{name, type, ...params}]`).
-- `metadata`: `name`, `description`, `dataset_split`, and for proposals `status: "proposal"` (accepted: `"active"`), `source_run_id` (its annotation-queue run), `source_trace_id`.
+- `metadata`: `name`, `description`, `dataset_split`, and for tests imported from a trace `source_run_id` (its annotation-queue run), `source_trace_id`, `source_output`, `source_feedback`. Older examples may carry `status: "proposal"` (the CLI skips them) or `xfail` (the CLI expects a failure); the editor shows neither, and drops `status: "proposal"` when it saves.
 - Empty `history` / `context` / `checks` are left out.
 - Assertion, check and test names are lowercase-with-dashes (typed `_`/spaces convert). Assertions and checks share one namespace (feedback keys).
 
@@ -44,40 +44,44 @@ A Given / When / Assert test editor for an agent, over one LangSmith dataset (de
 
 - **Autosave.** Tests autosave ~800 ms after the last valid edit; only the saved baseline updates after a save, so typing during a save isn't lost. The dirty check is cached per draft (WeakMap), because recorded mocks can be large. Because a test autosaves when opened if its save would differ, writers must store tests exactly as `toPayload` does: no empty optional fields.
 - **Inputs** are native controls styled with Macaw tokens (Macaw `Input` hit an invalid hook call in the sandbox).
-- **Given is everything true before the prompt**: context, history, mocks. When is only the prompt.
+- **Given is everything true before the prompt**: tool answers (mocks), earlier messages (history), files, context. When is only the prompt.
 - **Status dots.**
   - The status is the newest experiment's: pass = every key's min is 1, fail = some key's max is 0, flaky = anything else, error = every run raised.
   - Experiments are read newest first, stopping once every test has a status.
   - A test has no dot until its status is known: showing "never run" while loading would be false.
-- **Out of date** = the test was modified after the run's `dataset_version`, or the run's `git.commit` differs from the server's `agentCommit` (web only). It fades dots and chips and strikes the last-run line through.
+- **Out of date** = the test was modified after the run's `dataset_version`, or the run's `git.commit` differs from the server's `agentCommit` (web only). It fades dots and chips and the top bar says "Out of date · Run again" (no hashes; the reason is in the tooltip).
 - **Cost estimate** = the newest experiment's `total_cost / run_count` × repetitions, the agent's model calls only. Tests with no priced run are counted, not guessed.
-- **The results badge** counts assertions that passed on every repetition; rows that passed on some say "flaky".
+- **The results badge** counts assertions that passed on every repetition that ran ("2 of 5 passed every time"). An errored repetition never counts as a pass; a run where every repetition errored shows the friendly error in red. `INTERNAL_KEYS` (`all-tools-mocked`) are never shown.
 
-- **Proposals live in the eval dataset**, flagged by `metadata.status`, not in a separate staging dataset, so a proposal's run history carries over when it's accepted. Accept PATCHes only `metadata`. The inbox is the annotation queue's runs minus those some example already names in `source_run_id`; the queue item is removed on Accept or Delete, not on import, so a half-shaped proposal stays queued. `promptAndHistory` (data.ts) reads a root run's messages in LangChain, OpenAI or serialized-`lc` shape.
+- **No proposals in the UI** (2026-10-23, user decision). Importing a flagged trace or a past run creates an ordinary test and opens it; the flagged list is at the top of Import (the annotation queue's runs minus those some example names in `source_run_id`). The queue item is removed when the imported test is first saved, or when it's deleted. The known-bug (`xfail`) bar and Accept-as-known-bug are gone too; server/CLI handling is unchanged. `promptAndHistory` (data.ts) reads a root run's messages in LangChain, OpenAI or serialized-`lc` shape.
 
-- Written for a subject-matter expert, not an engineer (from an SME review, 2026-10-22):
-  - A run that called an unmocked tool shows "This run hit a gap in the test, not a problem with the agent" in the
-    drill-down (`mockGaps`, `AssertionDrilldown`), with "Add this mock", and hides "Judge right?" on those repetitions.
-  - Proposals keep the original reply and the flagging feedback (`metadata.source_output`, `source_feedback`) and
-    show them in `SourcePanel`. Accept is "as passing" or "as known bug" (`metadata.xfail` = reason; the CLI then
-    expects a failure and reports XPASSED once it passes). Tests with `xfail` show a "Known bug" bar with a clear button.
-  - Assertion and check names are generated (`slugify`, `autoCheckName`) until the expert types one, so a new
-    assertion or check never blocks saving. Check types show plain-English labels (`CHECK_LABELS`).
-  - Results say "2 of 3 checks" and chips say "2/3 runs"; mock rows preview values; turns are counted as user turns
-    everywhere; runs from before content hashes say "can't tell whether this result is current".
-  - A flagged card or an Import pick opens `TracePreview` in the middle column (message, reply, tool calls, flag);
-    nothing is written until Make proposal. `fetchTrace` reads the trace once; `importTrace(trace)` builds the draft from it.
-  - "Judge right? no" asks for a reason, saved as the `human-label` feedback's comment. When Re-grade says
-    `assertion_ambiguous` or `judge_unreliable`, the drill-down asks `/api/rewrite-assertion` (server/drafting.py) for 1-2
-    rewrites from those reasons and the judges'; Use this replaces the sentence and keeps the name.
-  - Suggest assertions (proposals, web mode only: it needs the server's judge model) posts the prompt, `source_output`
-    and `source_feedback` to `/api/suggest-assertions` and appends 2-4 rows, replacing an empty one.
-  - Results: tick two repetitions (any experiments) and Compare opens `RunCompare`, side by side.
+- Written for a subject-matter expert, not an engineer (SME reviews 2026-10-22 and -23). Rule: no ids or hashes
+  by default, one primary action per screen; debugging detail is hidden (tooltip, ⋯, Details, Advanced), not deleted.
+  Before/after screenshots: `/docs/simplify/`. After: ~147 words, 22 buttons, 6 inputs on a passing test (was 424/34/11).
+  - Top bar: editable title (stored as the dashed `name`; typed and shown as words; legacy `trace-<id>` names read
+    as the message), description line, status dot, `LastRun`, Run ×N, ⋯ (Results, Duplicate, Open in LangSmith,
+    Delete). "Saving…" and errors only; no "Saved".
+  - Given starts collapsed with a one-line summary; earlier messages and files show only once the test has some
+    (Add ▾); context is under Advanced (open when non-empty). Mock conditions read "When order_id is …" for one
+    string argument; any-argument and after-calls are under "More conditions".
+  - Then: one sentence per row with its chip and ⋯ (Rename, Delete): names stay generated (`slugify`, `autoCheckName`)
+    unless renamed. Code checks collapse to "+ Add code check" until one exists.
+  - A run that called an unmocked tool shows "A tool had no answer, so this result doesn't count." with Add answer
+    (`mockGaps`), and hides "Judge right?" on those repetitions.
+  - Errors read as `friendlyError` (401 → "Couldn't reach the model (API key rejected)", else "The run failed");
+    the raw text and traceback are under Details (`ErrorDetails`).
+  - Re-grade shows only when the repetitions disagree ("Why is this inconsistent?", web mode); verdict and advice
+    visible, the judge table under Details. Ambiguous/unreliable verdicts draft rewrites (`/api/rewrite-assertion`).
+  - "Judge right? ✗" asks for a reason, saved as the `human-label` feedback's comment.
+  - Suggest (any test with `source_trace_id`, web mode) posts the prompt, `source_output` and `source_feedback` to
+    `/api/suggest-assertions` and appends 2-4 rows, replacing an empty one.
+  - Results: per run, one badge line and ✓/✗ per repetition; Compare…/Trace in a repetition's ⋯ (shown on hover),
+    Open in LangSmith in the run's ⋯.
   - `assertionHints` (data.ts): quiet hints under an assertion for "and" joining two claims, vague words, or nothing observable.
 
 ## Gotchas
 
-- **1 MB custom-app bundle limit**; the bundle is ~957 KB. `postcss.config.js` drops non-Latin font subsets. Don't add Macaw's DropdownMenu back (~90 KB).
+- **1 MB custom-app bundle limit**; the bundle is ~953 KB. `postcss.config.js` drops non-Latin font subsets. Don't add Macaw's DropdownMenu back (~90 KB).
 - **`langsmith apps dev` token expiry.** It keeps the token it started with; after ~15 minutes calls return 401. Restart it.
 - **No binary files in the app directory.** The dev server rejects them; screenshots live in `/docs`.
 - **Errored runs.** LangSmith hands an errored run's evaluators `{"output": None}`, not `{}`. The harness detects an errored run by the missing `transcript`.
