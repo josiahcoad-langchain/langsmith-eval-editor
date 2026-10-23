@@ -7,7 +7,7 @@ export function ResultChip({ result, ranAt, stale = null, onOpen }: { result?: K
   if (!result || !result.n) return null;
   const tone = result.passed === result.n ? 'bg-success-subtle text-success-primary'
     : result.passed === 0 ? 'bg-error-subtle text-error-primary' : 'bg-warning-subtle text-warning-primary';
-  const label = `${stale ? `Out of date: ${stale}. ` : ''}Newest run${ranAt ? ` (${shortDate(ranAt)})` : ''}: passed ${result.passed} of ${result.n} repetition${result.n === 1 ? '' : 's'}. Click to see each repetition beside what the agent did.`;
+  const label = `${stale ? 'Out of date. ' : ''}Newest run${ranAt ? ` (${shortDate(ranAt)})` : ''}: passed ${result.passed} of ${result.n}. Click for details.`;
   return (
     <button type="button" onClick={onOpen} title={label} aria-label={label}
       className={`shrink-0 rounded-sm px-space-2 py-space-1 font-mono text-xs font-medium ${tone} ${stale ? 'opacity-40' : ''}`}>

@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Text } from '@langchain/macaw-components/Text';
 import { errorMessage, type TestFile } from '../lib/data';
 import { fileUrl, isWeb, removeFile, uploadFile } from '../runs';
@@ -7,11 +7,15 @@ import { RemoveButton, Subsection } from './fields';
 // Files the agent gets with the prompt: a photo to lighten, a video to caption. Each is stored on the test
 // (a LangSmith example attachment) and listed in inputs.attachments with its hash, so replacing one counts as
 // editing the test. Changes save immediately (not on autosave) because the bytes go straight to the server.
-export function FilesEditor({ exampleId, files, onChange }: { exampleId: string; files: TestFile[]; onChange: (files: TestFile[]) => void }) {
+// Nothing shows until the test has a file: Given's Add ▾ › File bumps `pick`, which opens the file picker.
+export function FilesEditor({ exampleId, files, onChange, pick = 0 }: { exampleId: string; files: TestFile[]; onChange: (files: TestFile[]) => void; pick?: number }) {
   const input = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState('');
   const [problem, setProblem] = useState('');
   const web = isWeb();
+  useEffect(() => {
+    if (pick && web) input.current?.click();
+  }, [pick, web]);
 
   const run = async (label: string, change: () => Promise<TestFile[]>) => {
     setBusy(label);
@@ -25,18 +29,20 @@ export function FilesEditor({ exampleId, files, onChange }: { exampleId: string;
     }
   };
 
+  const picker = (
+    <input ref={input} type="file" className="hidden" accept="image/*,video/*,audio/*,application/pdf,text/*"
+      onChange={(event) => {
+        const file = event.currentTarget.files?.[0];
+        event.currentTarget.value = '';
+        if (file) void run('Uploading…', () => uploadFile(exampleId, file));
+      }} />
+  );
+  if (!files.length && !busy && !problem) return picker;
   return (
     <Subsection title="Files" addLabel={busy || 'Add file'}
-      hint={web
-        ? 'Images or videos the agent gets with the prompt, as if the user uploaded them. The hook decides how they reach the agent.'
-        : 'Images or videos the agent gets with the prompt. Add them from the web editor, or with server/attach.py.'}
-      onAdd={() => (web && !busy ? input.current?.click() : undefined)}>
-      <input ref={input} type="file" className="hidden" accept="image/*,video/*,audio/*,application/pdf,text/*"
-        onChange={(event) => {
-          const file = event.currentTarget.files?.[0];
-          event.currentTarget.value = '';
-          if (file) void run('Uploading…', () => uploadFile(exampleId, file));
-        }} />
+      hint={web ? undefined : 'Add files from the web editor, or with server/attach.py.'}
+      onAdd={web && !busy ? () => input.current?.click() : undefined}>
+      {picker}
       {files.length ? (
         <div className="flex flex-wrap gap-space-3">
           {files.map((file) => (

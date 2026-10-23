@@ -9,7 +9,7 @@ function sizeLabel(textValue: string) {
 }
 
 // A readable one-line description of a response: the failure, the shape of a table, or the top-level fields.
-function responseSummary(response: string): { fails: boolean; text: string } {
+export function responseSummary(response: string): { fails: boolean; text: string } {
   if (!response.trim()) return { fails: false, text: 'No response yet' };
   const parsed = parseResponse(response);
   const size = sizeLabel(response);
@@ -66,6 +66,19 @@ function WhenChips({ when, anyValue, after }: { when: string; anyValue?: string;
       ))}
     </span>
   );
+}
+
+// "When order_id is A1001" for the usual one-argument case, typed as plain text; anything else is the arguments as
+// JSON ("When the arguments include {…}"). Both store the same `when` object.
+function WhenField({ when, onChange }: { when: string; onChange: (when: string) => void }) {
+  let parsed: unknown = null;
+  try { parsed = when.trim() ? JSON.parse(when) : null; } catch { parsed = undefined; }
+  const entries = isRecord(parsed) ? Object.entries(parsed) : [];
+  if (entries.length === 1 && typeof entries[0][1] === 'string') {
+    const [arg] = entries[0];
+    return <TextField label={`When ${arg} is`} value={String(entries[0][1])} onChange={(value) => onChange(JSON.stringify({ [arg]: value }))} mono />;
+  }
+  return <TextField label="When the arguments include" value={when} onChange={onChange} placeholder='{"order_id": "A1001"} (empty = any call)' mono />;
 }
 
 const PREVIEW_ROWS = 6;
@@ -139,13 +152,16 @@ function MockToolEditor({ mock, tools, onChange, onRemove }: {
               {isOpen ? (
                 <div className="flex flex-col gap-space-2 border-t border-default bg-surface-level-2 p-space-3">
                   {mock.cases ? (
-                    <div className="grid grid-cols-2 items-end gap-space-2">
-                      <TextField label="When the call's arguments include (JSON; empty = any)" value={row.when} onChange={(when) => patchRow(row.key, { when })} placeholder='{"order_id": "A1001"}' mono />
-                      <TextField label="Or when any argument equals (text)" value={row.anyValue ?? ''} onChange={(anyValue) => patchRow(row.key, { anyValue: anyValue || undefined })} placeholder="A1001" mono />
-                      <div className="col-span-2">
-                        <TextField label="Only after these calls succeeded in this run (JSON; {} = any arguments)" value={row.after ?? ''}
-                          onChange={(after) => patchRow(row.key, { after: after || undefined })} placeholder='{"update_post": {"post_id": "P1"}}' mono />
-                      </div>
+                    <div className="flex flex-col gap-space-2">
+                      <WhenField when={row.when} onChange={(when) => patchRow(row.key, { when })} />
+                      <details open={row.anyValue !== undefined || Boolean(row.after?.trim())} className="text-sm text-secondary">
+                        <summary className="cursor-pointer text-xs text-tertiary">More conditions</summary>
+                        <div className="mt-space-2 grid grid-cols-2 items-end gap-space-2">
+                          <TextField label="Or when any argument is" value={row.anyValue ?? ''} onChange={(anyValue) => patchRow(row.key, { anyValue: anyValue || undefined })} placeholder="A1001" mono />
+                          <TextField label="Only after these calls (JSON)" value={row.after ?? ''}
+                            onChange={(after) => patchRow(row.key, { after: after || undefined })} placeholder='{"update_post": {"post_id": "P1"}}' mono />
+                        </div>
+                      </details>
                     </div>
                   ) : null}
                   <TextAreaField label="Returns" value={row.response} onChange={(response) => patchRow(row.key, { response })}

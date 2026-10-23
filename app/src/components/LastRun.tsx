@@ -1,43 +1,40 @@
-import { shortDate, type TestSummary } from '../lib/data';
+import { dayDate, friendlyError, INTERNAL_KEYS, type TestSummary } from '../lib/data';
 
-// The test's newest result in one line at the top of the test, like an IDE's last-run banner: when, how it went,
-// what it cost, how long it took and which agent commit it ran on. When the result no longer describes the test
-// (`stale`), it says so instead of passing an old result off as current.
+// The test's newest result in a few words in the top bar ("Passed 3/3 · Oct 16"), like an IDE's last-run banner.
+// Cost, speed, agent version and per-assertion counts are in its tooltip; clicking it opens Results. When the result
+// no longer describes the test (`stale`), it says "Out of date" instead of passing an old result off as current.
 export function LastRun({ summary, stale, error = '', onOpen, onRun }: {
   summary?: TestSummary; stale: string | null; error?: string; onOpen: () => void; onRun?: () => void;
 }) {
   if (!summary) return null;
-  const run = (label: string) => onRun
-    ? <button type="button" className="font-medium text-brand-primary underline-offset-2 hover:underline" onClick={onRun}>{label}</button>
-    : null;
-  const elsewhere = summary.runningElsewhere
-    ? <span className="text-xs text-brand-primary">Running now (started outside this editor); results land when it's graded.</span>
-    : null;
-  if (summary.status === 'none') return elsewhere ?? <span className="text-xs text-tertiary">Never run. {run('Run now')}</span>;
-  const keys = Object.values(summary.keys);
-  const allPassed = keys.filter((k) => k.passed === k.n).length;
-  const verdict = summary.status === 'error'
-    ? 'errored (no grades)'
-    : `${allPassed} of ${keys.length} passed every repetition`;
+  if (summary.runningElsewhere) return <span className="text-xs text-brand-primary" title="Started outside this editor; results land when it's graded.">Running…</span>;
+  if (summary.status === 'none') return <span className="text-xs text-tertiary">Never run</span>;
+  const keys = Object.entries(summary.keys).filter(([key]) => !INTERNAL_KEYS.has(key));
+  const allPassed = keys.filter(([, k]) => k.passed === k.n).length;
+  const verdict = {
+    pass: `Passed ${summary.runs}/${summary.runs}`,
+    fail: 'Failed',
+    flaky: 'Mixed results',
+    error: friendlyError(error) || "Couldn't run",
+    none: '',
+  }[summary.status];
   const tone = { pass: 'text-success-primary', fail: 'text-error-primary', flaky: 'text-warning-primary', error: 'text-error-primary', none: '' }[summary.status];
-  const parts = [
+  const details = [
+    summary.status === 'error' ? '' : `${allPassed} of ${keys.length} assertions passed every time`,
     `${summary.runs} repetition${summary.runs === 1 ? '' : 's'}`,
-    summary.totalCost ? `$${summary.totalCost.toFixed(4)}${summary.runs ? ` ($${(summary.totalCost / summary.runs).toFixed(4)}/run)` : ''}` : '',
+    summary.totalCost ? `$${summary.totalCost.toFixed(4)}${summary.runs ? ` ($${(summary.totalCost / summary.runs).toFixed(4)} each)` : ''}` : '',
     summary.latencyP50 ? `median ${summary.latencyP50.toFixed(1)}s` : '',
     summary.agentCommit ? `agent ${summary.agentCommit.slice(0, 8)}` : '',
-  ].filter(Boolean);
+  ].filter(Boolean).join(' · ');
+  const open = (
+    <button type="button" className="underline-offset-2 hover:underline" title={`${stale ? `${stale} ` : ''}${details}`} onClick={onOpen}>
+      {stale ? 'Out of date' : <><span className={tone}>{verdict}</span><span className="text-tertiary"> · {dayDate(summary.ranAt)}</span></>}
+    </button>
+  );
   return (
-    <span className="flex flex-col text-xs">
-      <span className={stale ? 'text-tertiary line-through decoration-1' : 'text-secondary'}>
-        <button type="button" className="underline-offset-2 hover:underline" onClick={onOpen}>Last run {shortDate(summary.ranAt)}</button>
-        {': '}<span className={stale ? '' : tone}>{verdict}</span>{' · '}{parts.join(' · ')}
-      </span>
-      {summary.status === 'error' && error ? <span className="text-error-primary">Why: {error}</span> : null}
-      {elsewhere}
-      {!stale && !summary.testHash ? (
-        <span className="text-tertiary">Can't tell whether this result is current: the run predates change tracking. Run it again to be sure.</span>
-      ) : null}
-      {stale ? <span className="text-warning-primary">Out of date: {stale}. {run('Run it again') ?? 'Run it again'} to refresh.</span> : null}
+    <span className="flex items-center gap-space-1 whitespace-nowrap text-xs text-tertiary">
+      {open}
+      {stale && onRun ? <>{'·'}<button type="button" className="font-medium text-brand-primary underline-offset-2 hover:underline" onClick={onRun}>Run again</button></> : null}
     </span>
   );
 }
