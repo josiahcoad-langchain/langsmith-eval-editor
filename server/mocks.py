@@ -21,85 +21,18 @@ ToolMessage ("<tool> is not mocked in this test") and the call is recorded in `u
 fails the whole run as an incomplete test (an error, not a grade), so a test can only produce grades if it
 mocks everything the agent touched.
 
-Dates in responses (strings that start with YYYY-MM-DD) move forward by the days between `recorded_on` and
-today, so recorded data looks exactly as fresh on every run as it did the day it was recorded. Assertions move
-with them (`shift_text`), so "It gives the delivery date of October 24" still means the date the tool returned.
+Responses are returned exactly as written, dates included: a test runs as of the day it was recorded (the harness
+hands the agent that day as `today`), so nothing in it needs to move.
 """
 
 from __future__ import annotations
 
 import json
-import re
 import threading
-from datetime import date, timedelta
 from typing import Any
 
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import ToolMessage
-
-_ISO_DATE = re.compile(r"^(\d{4}-\d{2}-\d{2})(.*)$", re.S)
-
-
-def shift_dates(value: Any, days: int) -> Any:
-    if not days:
-        return value
-    if isinstance(value, dict):
-        return {key: shift_dates(item, days) for key, item in value.items()}
-    if isinstance(value, list):
-        return [shift_dates(item, days) for item in value]
-    if isinstance(value, str) and (match := _ISO_DATE.match(value)):
-        try:
-            return str(date.fromisoformat(match.group(1)) + timedelta(days=days)) + match.group(2)
-        except ValueError:
-            return value
-    return value
-
-
-_MONTHS = ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october",
-           "november", "december"]
-_MONTH = r"(?P<month>" + "|".join(f"{m[:3]}(?:{m[3:]})?" for m in _MONTHS) + r")\.?"
-# 2026-10-24 · October 24, 2026 · Oct 24 · 24 October 2026
-_TEXT_DATE = re.compile(
-    r"\b(?P<iso>\d{4}-\d{2}-\d{2})\b"
-    rf"|\b{_MONTH} (?P<day>\d{{1,2}})(?:st|nd|rd|th)?(?:, (?P<year>\d{{4}}))?\b"
-    rf"|\b(?P<day2>\d{{1,2}}) {_MONTH.replace('month', 'month2')} (?P<year2>\d{{4}})\b", re.I)
-
-
-def shift_days(recorded_on: str | None, today: date | None = None) -> int:
-    return ((today or date.today()) - date.fromisoformat(recorded_on)).days if recorded_on else 0
-
-
-def shift_text(text: str, days: int, recorded_on: str | None = None) -> str:
-    """Moves the dates written in free text (an assertion) by `days`, keeping each one's own format. A date
-    without a year ("Oct 24") is read as in the year the test was recorded."""
-    if not days:
-        return text
-
-    def move(match: re.Match) -> str:
-        if match["iso"]:
-            try:
-                return str(date.fromisoformat(match["iso"]) + timedelta(days=days))
-            except ValueError:
-                return match[0]
-        month_word = match["month"] or match["month2"]
-        year = match["year"] or match["year2"]
-        try:
-            when = date(int(year or (recorded_on or str(date.today()))[:4]), _month(month_word),
-                        int(match["day"] or match["day2"])) + timedelta(days=days)
-        except ValueError:
-            return match[0]
-        name = _MONTHS[when.month - 1].capitalize()
-        name = name[:3] + ("." if month_word.endswith(".") else "") if len(month_word.rstrip(".")) == 3 else name
-        if match["day2"]:
-            return f"{when.day} {name} {when.year}"
-        return f"{name} {when.day}" + (f", {when.year}" if year else "")
-
-    return _TEXT_DATE.sub(move, text)
-
-
-def _month(word: str) -> int:
-    return next(index for index, name in enumerate(_MONTHS, 1) if name.startswith(word.rstrip(".").lower()))
-
 
 class NotMocked(Exception):
     pass
@@ -131,9 +64,8 @@ def _all_values(value: Any) -> list[Any]:
 class MockTools:
     """One test's mocks. Create a fresh instance per run: it records the calls that run made."""
 
-    def __init__(self, mocks: dict[str, Any] | None, recorded_on: str | None = None, today: date | None = None):
+    def __init__(self, mocks: dict[str, Any] | None):
         self.mocks = mocks or {}
-        self.shift_days = shift_days(recorded_on, today)
         self.calls: list[dict[str, Any]] = []
         self.unmocked: list[dict[str, Any]] = []
         # Tool calls from one model turn run in parallel threads; a sequence picks its response by counting calls.
@@ -147,13 +79,13 @@ class MockTools:
         if isinstance(mock, dict) and set(mock) == {"sequence"}:
             if not mock["sequence"]:
                 raise NotMocked(f"{name} has an empty sequence in this test")
-            return shift_dates(self._next_in_sequence(name, mock["sequence"]), self.shift_days)
+            return self._next_in_sequence(name, mock["sequence"])
         if isinstance(mock, dict) and set(mock) == {"cases"}:
             for case in mock["cases"]:
                 if _case_matches(case, args, self.calls):
-                    return shift_dates(case.get("response"), self.shift_days)
+                    return case.get("response")
             raise NotMocked(f"{name} is not mocked in this test for arguments {json.dumps(args, sort_keys=True)}")
-        return shift_dates(mock, self.shift_days)
+        return mock
 
     def _next_in_sequence(self, name: str, responses: list[Any]) -> Any:
         # The last response repeats so a test needn't predict the exact call count.

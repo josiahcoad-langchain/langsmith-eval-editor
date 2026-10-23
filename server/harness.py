@@ -1,7 +1,8 @@
 """Runs tests from the dataset against the agent (via hook.run_agent) and logs each test as a LangSmith experiment.
 
 Each test (dataset example) is Given / When / Then:
-  inputs.mock_tools, inputs.recorded_on   Given: every tool response the run may see (see mocks.py)
+  inputs.mock_tools                       Given: every tool response the run may see (see mocks.py)
+  inputs.recorded_on                      Given: the day the test runs as of; the hook's `today`
   inputs.history                          Given: prior turns [{role, content}] sent before the prompt (assistant
                                           turns may carry tool_calls; role "tool" turns are their results)
   inputs.context                          Given: opaque JSON the hook uses to set the agent up (its own keys)
@@ -31,6 +32,7 @@ import inspect
 import json
 import os
 import time
+from datetime import date
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 
@@ -47,7 +49,7 @@ from checks import run_checks  # noqa: E402
 from content_hash import content_hash  # noqa: E402
 from evidence import build_evidence  # noqa: E402
 from files import AgentRun, Attachment, FileProblem, describe, materialize  # noqa: E402
-from mocks import MockTools, shift_text  # noqa: E402
+from mocks import MockTools  # noqa: E402
 from suite import Repetition, is_proposal  # noqa: E402
 
 hook = load_hook()  # after load_dotenv: the agent reads its model settings at import
@@ -99,6 +101,10 @@ def _this_turn(messages: list[BaseMessage], inputs: dict) -> list[BaseMessage]:
 def _run_agent(inputs: dict, mocks: MockTools, files: list[Attachment]) -> list[BaseMessage] | AgentRun:
     # Pass history, context and files only when the test has them, so hooks written before they existed still work.
     extra: dict = {key: inputs[key] for key in ("history", "context") if inputs.get(key)}
+    # A test runs as of the day it was recorded, so its mocks' dates mean what they meant then. A hook that takes
+    # `today` gives it to the agent; one that doesn't runs on the real clock.
+    if inputs.get("recorded_on") and "today" in inspect.signature(hook.run_agent).parameters:
+        extra["today"] = date.fromisoformat(inputs["recorded_on"])
     if files:
         if "attachments" not in inspect.signature(hook.run_agent).parameters:
             raise IncompleteTest("This agent can't take files: the hook's run_agent has no `attachments` parameter.")
@@ -112,7 +118,7 @@ def target(inputs: dict, attachments: dict | None = None) -> dict:
     `attachments` is LangSmith's name for the example's stored files ({name: {reader, mime_type, ...}}); it
     passes them because this function has a parameter by that name (see files.py).
     """
-    mocks = MockTools(inputs.get("mock_tools"), inputs.get("recorded_on"))
+    mocks = MockTools(inputs.get("mock_tools"))
     try:
         files = materialize(inputs.get("attachments") or [], attachments)
     except FileProblem as problem:
@@ -130,9 +136,6 @@ def target(inputs: dict, attachments: dict | None = None) -> dict:
                "transcript": _transcript(turn)}
     if made:
         outputs["files"] = describe(made)
-    if mocks.shift_days:
-        # How far this run moved the mocks' dates, so grading (now or a re-grade later) moves the assertions' too.
-        outputs["date_shift_days"] = mocks.shift_days
     return outputs
 
 
@@ -197,18 +200,11 @@ def _judge_all(tests: list[dict], evidence: dict) -> list[Grade]:
     return _judge().with_structured_output(Grades, method="json_schema").invoke(prompt).grades
 
 
-def as_run(assertion: dict, inputs: dict, outputs: dict) -> dict:
-    """The assertion as this run saw the world: the run moved the mocks' dates forward, so its dates move too."""
-    days = outputs.get("date_shift_days") or 0
-    return {"name": assertion["name"], "assertion": shift_text(assertion.get("assertion") or "", days, inputs.get("recorded_on"))}
-
-
 def assertions(inputs: dict, outputs: dict, reference_outputs: dict) -> dict:
     """Grades every assertion in one call; each becomes its own feedback key."""
     tests = [t for t in reference_outputs.get("assertions") or [] if t.get("name")]
     if not tests or _errored(outputs):
         return {"results": []}
-    tests = [as_run(t, inputs, outputs) for t in tests]
     evidence = build_evidence(inputs, outputs, EVIDENCE_LIMIT)
     # A hook may grade assertions its own way, e.g. with a cheap yes/no classifier that hands only the cases it
     # is unsure of to a chat model. It returns one {name, passed, reason} per assertion.

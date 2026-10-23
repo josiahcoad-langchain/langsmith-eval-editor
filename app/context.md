@@ -33,7 +33,7 @@ A Given / When / Then test editor for an agent, over one LangSmith dataset (defa
   - `prompt`
   - `history?` (`[{role, content}]`; an assistant turn may carry `tool_calls: [{id, name, args}]`, and a `tool` turn is one call's result, `{role: "tool", content, tool_call_id, name}`: LangChain message dicts)
   - `context?` (opaque JSON for the hook)
-  - `recorded_on?`
+  - `recorded_on?` (the day the test runs as of: the hook gets it as `today`; mock dates are never shifted)
   - `mock_tools`: `{tool: response | {"cases": [{when?, when_any_value?, response}]} | {"sequence": [...]} | {"raise": msg}}`
 - `outputs`: `assertions` (`[{name, assertion}]`) and `checks?` (`[{name, type, ...params}]`).
 - `metadata`: `name`, `description`, `dataset_split`, and for tests imported from a trace `source_run_id` (its annotation-queue run), `source_trace_id`, `source_output`, `source_feedback`. Older examples may carry `status: "proposal"` (the CLI skips them) or `xfail` (the CLI expects a failure); the editor shows neither, and drops `status: "proposal"` when it saves.

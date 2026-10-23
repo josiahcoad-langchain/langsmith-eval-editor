@@ -66,7 +66,7 @@ def regrade(client: Client, example_id: str, name: str, times: int = 3) -> dict[
 
 def _grade_once(grader: Grader, assertion: dict, run: Any) -> Any:
     evidence = build_evidence(run.inputs or {}, run.outputs or {}, harness.EVIDENCE_LIMIT)
-    grades = grader([harness.as_run(assertion, run.inputs or {}, run.outputs or {})], evidence)
+    grades = grader([{"name": assertion["name"], "assertion": assertion["assertion"]}], evidence)
     match = next((g for g in grades if g.name == assertion["name"]), None)
     return match or harness.Grade(name=assertion["name"], passed=None, reason="The judge returned no grade.")
 
