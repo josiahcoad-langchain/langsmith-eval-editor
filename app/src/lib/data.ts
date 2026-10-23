@@ -171,7 +171,6 @@ export function nameFromPrompt(prompt: string) {
 // Quiet hints under an assertion, for wordings judges tend to grade inconsistently. Advice, never a blocker.
 const VAGUE = /\b(appropriate(?:ly)?|good|properly|proper|correctly|reasonabl[ey]|adequate(?:ly)?|helpful|nice|suitabl[ey]|relevant)\b/i;
 const OBSERVABLE_VERB = 'says?|tells?|asks?|calls?|mentions?|offers?|repl(?:y|ies)|responds?|refuses?|declines?|includes?|quotes?|confirms?|apologi[sz]es?|promises?|recommends?|uses?|lists?|gives?|states?|explains?|escalates?|creates?|sends?|books?|cancels?|returns?|provides?|suggests?|names?|cites?|links?|writes?|answers?|shows?|requests?|summari[sz]es?|informs?|notes?|warns?|reports?|issues?|looks? up|checks?|refunds?|pass(?:es)?';
-const OBSERVABLE = new RegExp(`\\b(${OBSERVABLE_VERB}|does not|doesn't|never|only|before|after)\\b|\`|\\w+_\\w+|"[^"]+"`, 'i');
 const SECOND_CLAIM = new RegExp(`^(it|the agent|they|then|also|never|does|doesn't|is|isn't|will|won't|must|can't|cannot|${OBSERVABLE_VERB})\\b`, 'i');
 
 export function assertionHints(sentence: string): string[] {
@@ -184,7 +183,6 @@ export function assertionHints(sentence: string): string[] {
   }
   const vague = VAGUE.exec(sentence)?.[1];
   if (vague) hints.push(`“${vague}” is vague: judges read it differently. Say what the agent does instead.`);
-  if (!OBSERVABLE.test(sentence)) hints.push('Nothing here shows in a transcript. Say what the agent says, asks or calls.');
   return hints;
 }
 
