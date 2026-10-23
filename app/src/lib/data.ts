@@ -163,6 +163,11 @@ export function slugify(sentence: string, words = 5) {
   return sentence.toLowerCase().replace(/[^a-z0-9\s-]/g, ' ').split(/\s+/).filter(Boolean).slice(0, words).join('-').slice(0, 48);
 }
 
+// A test's default name from its message: "where-is-my-order-a1002" ("it's" reads as "its", not "it-s").
+export function nameFromPrompt(prompt: string) {
+  return slugify(prompt.replace(/['’]/g, ''), 6);
+}
+
 // Quiet hints under an assertion, for wordings judges tend to grade inconsistently. Advice, never a blocker.
 const VAGUE = /\b(appropriate(?:ly)?|good|properly|proper|correctly|reasonabl[ey]|adequate(?:ly)?|helpful|nice|suitabl[ey]|relevant)\b/i;
 const OBSERVABLE_VERB = 'says?|tells?|asks?|calls?|mentions?|offers?|repl(?:y|ies)|responds?|refuses?|declines?|includes?|quotes?|confirms?|apologi[sz]es?|promises?|recommends?|uses?|lists?|gives?|states?|explains?|escalates?|creates?|sends?|books?|cancels?|returns?|provides?|suggests?|names?|cites?|links?|writes?|answers?|shows?|requests?|summari[sz]es?|informs?|notes?|warns?|reports?|issues?|looks? up|checks?|refunds?|pass(?:es)?';
@@ -257,10 +262,6 @@ function checkPayload(check: Check): Json {
   }
 }
 
-export function historyChars(history: HistoryTurn[]) {
-  return history.reduce((sum, turn) => sum + turn.content.length, 0);
-}
-
 export function contextProblem(context: string) {
   return parseJsonObject(context).error ?? null;
 }
@@ -321,14 +322,14 @@ export function toPayload(example: Example, draft: Draft): { payload?: Pick<Exam
   if (!draft.name.trim()) return { error: 'Give the test a name.' };
   if (!draft.prompt.trim()) return { error: 'Write the prompt (When).' };
   // A fully blank row (new and imported tests start with one) is left out rather than blocking the save.
-  const assertions = draft.assertions.filter((row) => row.name.trim() || row.assertion.trim());
-  if (assertions.some((row) => !row.name.trim())) return { error: 'Every assertion needs a name.' };
-  if (draft.checks.some((check) => !check.name.trim())) return { error: 'Every check needs a name.' };
-  // Assertions and checks share one namespace: each name becomes a LangSmith feedback key.
-  const names = [...assertions.map((row) => row.name.trim()), ...draft.checks.map((check) => check.name.trim())];
-  const dupe = names.find((name, index) => names.indexOf(name) !== index);
-  if (dupe) return { error: `Two assertions or checks are named "${dupe}".` };
-  for (const check of draft.checks) {
+  // Names are feedback keys, made from the sentence (or the check) like a slug; a repeat gets -2, -3 instead of an error.
+  const taken = new Set<string>();
+  const unique = (name: string) => { let out = name; for (let n = 2; taken.has(out); n++) out = `${name}-${n}`; taken.add(out); return out; };
+  // A blank row (new and imported tests start with one) is left out rather than blocking the save.
+  const assertions = draft.assertions.filter((row) => row.assertion.trim())
+    .map((row) => ({ ...row, name: unique(row.name.trim() || slugify(row.assertion) || 'assertion') }));
+  const checks = draft.checks.map((check) => ({ ...check, name: unique(check.name.trim() || autoCheckName(check)) }));
+  for (const check of checks) {
     const problem = checkProblem(check);
     if (problem) return { error: `Check "${check.name}": ${problem}` };
   }
@@ -386,7 +387,7 @@ export function toPayload(example: Example, draft: Draft): { payload?: Pick<Exam
       outputs: {
         ...outputs,
         assertions: assertions.map((row) => ({ name: row.name.trim(), assertion: row.assertion })),
-        ...(draft.checks.length ? { checks: draft.checks.map(checkPayload) } : {}),
+        ...(checks.length ? { checks: checks.map(checkPayload) } : {}),
       },
       metadata: { ...example.metadata, name: draft.name.trim(), description: draft.description, dataset_split: draft.splits },
     },
@@ -688,14 +689,12 @@ export function staleness(summary: TestSummary | undefined, currentHash: string 
   sameAgentCommits?: string[]): string | null {
   if (!summary || summary.status === 'none') return null;
   // Runs from before hashes were recorded can't be compared; saying "out of date" for them would be a guess.
-  if (summary.testHash && currentHash && summary.testHash !== currentHash) return 'the test was edited after this run';
+  if (summary.testHash && currentHash && summary.testHash !== currentHash) return 'The test changed since this run.';
   const ran = summary.agentCommit;
   const sameAgent = sameAgentCommits?.length
     ? sameAgentCommits.some((commit) => commit.startsWith(ran.slice(0, 7)))
     : !agentCommit || ran.startsWith(agentCommit.slice(0, 7));
-  if (agentCommit && ran && !sameAgent) {
-    return `the agent's code changed since this run (${summary.agentCommit.slice(0, 8)} → ${agentCommit.slice(0, 8)})`;
-  }
+  if (agentCommit && ran && !sameAgent) return 'The agent changed since this run.';
   return null;
 }
 
@@ -802,8 +801,7 @@ function toolResponse(run: Json): unknown {
   return typeof content === 'string' ? parseResponse(content) : content;
 }
 
-// A recorded trace: its root run and its calls to the agent's tools, oldest first. Read once for the preview and
-// reused by Make proposal, so confirming doesn't fetch it again.
+// A recorded trace: its root run and its calls to the agent's tools, oldest first.
 export type Trace = { traceId: string; root: Json; toolRuns: Json[] };
 
 export async function fetchTrace(traceId: string, agentTools: string[]): Promise<Trace> {
@@ -816,21 +814,9 @@ export async function fetchTrace(traceId: string, agentTools: string[]): Promise
   return { traceId, root, toolRuns };
 }
 
-// What the preview shows before anything is written: the message, the agent's reply and its tool calls, in the
-// shape a test result's tool calls have ({name, args, result | error}).
-export function tracePreview(trace: Trace) {
-  const { prompt, history } = promptAndHistory(trace.root.inputs);
-  const toolCalls = trace.toolRuns.map((run): Json => {
-    const response = toolResponse(run);
-    const raised = isRecord(response) && 'raise' in response && Object.keys(response).length === 1;
-    return { name: text(run.name), args: isRecord(run.inputs) ? run.inputs : {}, ...(raised ? { error: text(response.raise) } : { result: response }) };
-  });
-  return { prompt, turns: history.filter((t) => t.role === 'user').length, reply: finalReply(trace.root.outputs), toolCalls, start: text(trace.root.start_time) };
-}
-
 // Builds a test from a recorded trace: the user's prompt becomes When, and every call to one of the agent's tools
 // becomes a mock (one case per distinct argument set). Assertions are left for the user to write.
-export function importTrace(trace: Trace) {
+export function importTrace(trace: Trace, feedback: SourceFeedback[] = []) {
   const { traceId, root, toolRuns } = trace;
   const byTool = new Map<string, { args: Json; response: unknown }[]>();
   for (const run of toolRuns) {
@@ -848,9 +834,10 @@ export function importTrace(trace: Trace) {
   }));
   const started = text(root.start_time).slice(0, 10);
   const { prompt, history } = promptAndHistory(root.inputs);
+  // Named from the message ("where-is-my-order-a1002"), so nobody reads a trace id; described by the flag's comment.
   const draft: Draft = {
-    name: `trace-${traceId.slice(0, 8)}`,
-    description: `Imported from trace ${traceId} (${started}).`,
+    name: nameFromPrompt(prompt) || `trace-${traceId.slice(0, 8)}`,
+    description: feedback.map((row) => row.comment.trim()).find(Boolean) ?? '',
     prompt,
     mockTools,
     history,
@@ -897,12 +884,12 @@ export async function fetchTraceFeedback(traceId: string): Promise<SourceFeedbac
   }));
 }
 
-// A piece of feedback in one line: `key = score (or value) · on run · "comment" · correction: …`.
+// A piece of feedback in one line: `key = score (or value) · "comment" · correction: …`. Which run it's on (`run`)
+// is kept for the drafter, not shown.
 export function feedbackLine(row: Json) {
   const shown = typeof row.score === 'number' ? String(row.score) : row.value !== undefined ? (typeof row.value === 'string' ? row.value : JSON.stringify(row.value)) : '';
   return [
     `${text(row.key) || 'feedback'}${shown ? ` = ${shown}` : ''}`,
-    text(row.run) ? `on ${text(row.run)}` : '',
     text(row.comment) ? `“${text(row.comment)}”` : '',
     row.correction !== undefined ? `correction: ${typeof row.correction === 'string' ? row.correction : JSON.stringify(row.correction)}` : '',
   ].filter(Boolean).join(' · ');
@@ -931,6 +918,25 @@ export function shortDate(iso: string) {
   const date = new Date(iso.endsWith('Z') || iso.includes('+') ? iso : `${iso}Z`);
   return Number.isNaN(date.getTime()) ? iso.slice(0, 16) : date.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
 }
+
+// "Oct 16": a run's day, for the one-line summaries; the time is in shortDate.
+export function dayDate(iso: string) {
+  const date = new Date(iso.endsWith('Z') || iso.includes('+') ? iso : `${iso}Z`);
+  return Number.isNaN(date.getTime()) ? iso.slice(0, 10) : date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+}
+
+// A run's error in words an expert can act on. The raw error and traceback stay behind "Details".
+export function friendlyError(error: string) {
+  if (!error) return '';
+  if (/\b401\b|invalid x-api-key|authentication_error|api key/i.test(error)) return "Couldn't reach the model (API key rejected)";
+  if (/\b429\b|rate.?limit/i.test(error)) return 'The model was busy (rate limited)';
+  if (/no mock answered|is not mocked/i.test(error)) return 'A tool had no answer';
+  if (/timed? ?out|timeout/i.test(error)) return 'The run timed out';
+  return 'The run failed';
+}
+
+// Feedback keys the harness writes for its own bookkeeping, not the expert's assertions. Never shown as results.
+export const INTERNAL_KEYS = new Set(['all-tools-mocked']);
 
 export function duration(start: string, end: string) {
   const ms = new Date(end).getTime() - new Date(start).getTime();
@@ -962,14 +968,11 @@ export async function openTrace(result: Pick<TestResult, 'runId' | 'experimentId
   if (response?.url) window.langsmith.openUrl(response.url, { newTab: true });
 }
 
-// --- Proposals ------------------------------------------------------------------------------------------------
-// A proposal is a test that isn't part of the eval set yet: a dataset example with metadata.status = "proposal".
-// Flagged traces arrive in an annotation queue (PROPOSALS_QUEUE); opening one imports it as a proposal that
-// remembers its queue run (metadata.source_run_id). Accept makes it a test and takes the run out of the queue.
-
-export function isProposal(example: Example) {
-  return example.metadata.status === 'proposal';
-}
+// --- Flagged traces ---------------------------------------------------------------------------------------------
+// Flagged traces arrive in an annotation queue (PROPOSALS_QUEUE). Importing one makes an ordinary test that
+// remembers its queue run (metadata.source_run_id); the run leaves the queue once that test is saved or deleted.
+// Examples from before still carry metadata.status = "proposal" (the CLI skips them); the editor lists them as
+// ordinary tests and drops the mark the next time one is saved.
 
 export type QueuedRun = { runId: string; traceId: string; prompt: string; turns: number; start: string; hidden: boolean };
 
@@ -995,35 +998,18 @@ export async function removeFromQueue(queueId: string, runId: string) {
   await callLangSmith(`DELETE /api/v1/annotation-queues/${queueId}/runs/${runId}`);
 }
 
-// A new, unsaved proposal from an imported trace; autosave creates the example once it's valid.
+// A new, unsaved test from an imported trace; autosave creates the example once it's valid.
 // `source` is what went wrong in the original run (its reply and the feedback that flagged it), kept so the expert
 // can see it while writing assertions.
-export function proposalExample(prompt: string, recordedOn: string, traceId: string, runId?: string,
+export function traceExample(prompt: string, recordedOn: string, traceId: string, runId?: string,
   source?: { output: string; feedback: SourceFeedback[] }): Example {
   const example = emptyExample();
   return {
     ...example,
     inputs: { prompt, recorded_on: recordedOn },
     metadata: {
-      ...example.metadata, status: 'proposal', source_trace_id: traceId, ...(runId ? { source_run_id: runId } : {}),
+      ...example.metadata, source_trace_id: traceId, ...(runId ? { source_run_id: runId } : {}),
       ...(source?.output ? { source_output: source.output } : {}), ...(source?.feedback.length ? { source_feedback: source.feedback } : {}),
     },
   };
-}
-
-// Accept: the proposal becomes a test. Only metadata changes, so its results stay current. A flagged trace is
-// usually a known bug: `knownBug` (the reason) marks it xfail, so it's expected to fail until the agent is fixed and
-// the CLI reports it XPASSED, failing the suite, once it starts passing (server/suite.py).
-export async function acceptProposal(example: Example, knownBug?: string): Promise<Example> {
-  const metadata = { ...example.metadata, status: 'active', ...(knownBug ? { xfail: knownBug } : {}) };
-  await callLangSmith(`PATCH /api/v1/examples/${example.id}`, { body: { metadata } });
-  return { ...example, metadata };
-}
-
-// Marks a test as a known bug (reason) or clears the mark (null).
-export async function setKnownBug(example: Example, reason: string | null): Promise<Example> {
-  const { xfail: _old, ...rest } = example.metadata;
-  const metadata = reason ? { ...rest, xfail: reason } : rest;
-  await callLangSmith(`PATCH /api/v1/examples/${example.id}`, { body: { metadata } });
-  return { ...example, metadata };
 }

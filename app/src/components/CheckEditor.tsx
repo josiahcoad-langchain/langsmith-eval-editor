@@ -3,19 +3,8 @@ import { RemoveButton, TextAreaField, TextField, fieldClass } from './fields';
 import { CHECK_LABELS, CHECK_TYPES, checkProblem, type Check } from '../lib/data';
 
 const selectClass = `${fieldClass} font-mono`;
-const HINTS: Record<string, string> = {
-  must_call: 'Each row must be called. A row with several tools passes if any one of them is called.',
-  must_not_call: 'None of these tools may be called.',
-  max_tool_calls: 'At most this many tool calls in total, or of one tool.',
-  max_tool_rounds: 'At most this many rounds of tool calls (a round is one model turn that calls tools).',
-  must_call_before: 'The first tool must be called before the second.',
-  must_call_with_values: 'The tool must be called with arguments that include these values.',
-  max_prompt_tokens: 'No single model call may have a prompt longer than this.',
-  max_model_calls: 'At most this many model calls in total.',
-  must_output_file: 'The agent must make a file. Fields: {"mime": "image/"} and/or {"name_contains": "report"}; {} = any file.',
-  custom: "Any fields; handled by the agent's hook.",
-};
-
+// The dropdown's label says what each type does; only "custom" needs a word more.
+const CUSTOM_HINT = "Any fields; handled by the agent's hook.";
 function ToolSelect({ value, tools, onChange, label }: { value: string; tools: string[]; onChange: (tool: string) => void; label: string }) {
   return (
     <select className={selectClass} aria-label={label} value={value} onChange={(event) => onChange(event.currentTarget.value)}>
@@ -56,7 +45,7 @@ function ToolGroups({ groups, tools, anyOf, onChange }: { groups: string[][]; to
   );
 }
 
-// One code check: a name (its feedback key), a type, and that type's params.
+// One code check: a type and that type's params. Its name (the feedback key) is generated from it.
 export function CheckEditor({ check, tools, onChange, onRemove, result }: {
   check: Check; tools: string[]; onChange: (patch: Partial<Check>) => void; onRemove: () => void; result?: ReactNode;
 }) {
@@ -65,7 +54,6 @@ export function CheckEditor({ check, tools, onChange, onRemove, result }: {
   return (
     <div className="flex flex-col gap-space-2 rounded-md border border-default bg-surface-level-1 p-space-3">
       <div className="flex items-center gap-space-2">
-        <div className="w-64"><TextField value={check.name} onChange={(name) => onChange({ name: name.toLowerCase().replace(/[\s_]+/g, '-') })} placeholder="check-name" mono /></div>
         <select className={`${selectClass} w-56`} aria-label="Check type" value={check.type}
           // Params belong to a type, so switching drops the old type's JSON; the name stays.
           onChange={(event) => onChange({ type: event.currentTarget.value, extra: {}, json: '' })}>
@@ -74,9 +62,9 @@ export function CheckEditor({ check, tools, onChange, onRemove, result }: {
         </select>
         <div className="flex-1" />
         {result}
-        <RemoveButton label={`Remove check ${check.name}`} onClick={onRemove} />
+        <RemoveButton label="Delete check" onClick={onRemove} />
       </div>
-      <span className="text-xs text-tertiary">{HINTS[check.type] ?? HINTS.custom}</span>
+      {check.type === 'custom' || !(CHECK_TYPES as readonly string[]).includes(check.type) ? <span className="text-xs text-tertiary">{CUSTOM_HINT}</span> : null}
       {check.type === 'must_call' || check.type === 'must_not_call' ? (
         <ToolGroups groups={check.groups} tools={tools} anyOf={check.type === 'must_call'} onChange={(groups) => onChange({ groups })} />
       ) : null}
@@ -101,8 +89,8 @@ export function CheckEditor({ check, tools, onChange, onRemove, result }: {
           <TextAreaField label="Args (JSON object)" value={check.json} onChange={(json) => onChange({ json })} rows={3} mono placeholder='{"order_id": "A1001"}' />
         </div>
       ) : null}
-      {!(check.type in HINTS) || check.type === 'custom' || check.type === 'must_output_file' ? (
-        <TextAreaField label="Fields (JSON object, without name and type)" value={check.json} onChange={(json) => onChange({ json })} rows={4} mono placeholder='{"threshold": 3}' />
+      {!(CHECK_TYPES as readonly string[]).includes(check.type) || check.type === 'custom' || check.type === 'must_output_file' ? (
+        <TextAreaField label={check.type === 'must_output_file' ? 'Fields (JSON, e.g. {"mime": "image/"}; {} = any file)' : 'Fields (JSON object, without name and type)'} value={check.json} onChange={(json) => onChange({ json })} rows={4} mono placeholder='{"threshold": 3}' />
       ) : null}
       {problem ? <span className="text-xs text-error-primary">{problem}</span> : null}
     </div>

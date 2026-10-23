@@ -1,5 +1,6 @@
 import { useEffect } from 'react';
-import { shortDate, stableStringify, text, type TestResult } from '../lib/data';
+import { friendlyError, INTERNAL_KEYS, shortDate, stableStringify, text, type TestResult } from '../lib/data';
+import { ErrorDetails } from './ErrorDetails';
 import { Markdown } from './Markdown';
 import { ToolCalls } from './ToolCalls';
 
@@ -14,7 +15,7 @@ export function RunCompare({ runs, labels, onClose }: { runs: [TestResult, TestR
 
   const [a, b] = runs;
   const score = (run: TestResult, key: string) => run.assertions.find((x) => x.key === key)?.score ?? null;
-  const keys = [...new Set([...a.assertions, ...b.assertions].map((x) => x.key))];
+  const keys = [...new Set([...a.assertions, ...b.assertions].map((x) => x.key))].filter((key) => !INTERNAL_KEYS.has(key));
   const gradesDiffer = keys.filter((key) => score(a, key) !== score(b, key));
   const calls = (run: TestResult, withResults = false) => run.toolCalls
     .map((c) => stableStringify(withResults ? { name: c.name, args: c.args, result: c.result, error: c.error } : { name: c.name, args: c.args })).join('\n');
@@ -40,10 +41,7 @@ export function RunCompare({ runs, labels, onClose }: { runs: [TestResult, TestR
         <div className="grid grid-cols-2 gap-space-3">
           {runs.map((run) => (
             <div key={run.runId} className="flex min-w-0 flex-col gap-space-2 rounded-sm border border-default p-space-2">
-              <span className="flex flex-col">
-                <span className="font-medium text-primary">{labels[run.runId] ?? shortDate(run.start)}</span>
-                <span className="truncate text-tertiary">{run.experimentName}</span>
-              </span>
+              <span className="font-medium text-primary">{labels[run.runId] ?? shortDate(run.start)}</span>
               <ul className="flex flex-col gap-px">
                 {keys.map((key) => (
                   <li key={key} className={`flex gap-space-2 ${gradesDiffer.includes(key) ? 'rounded-sm bg-warning-subtle' : ''}`}>
@@ -52,7 +50,8 @@ export function RunCompare({ runs, labels, onClose }: { runs: [TestResult, TestR
                   </li>
                 ))}
               </ul>
-              {run.error ? <span className="text-error-primary">{run.error}</span> : null}
+              {run.error ? <span className="text-error-primary">{friendlyError(run.error)}</span> : null}
+              <ErrorDetails error={run.error} traceback={run.traceback} />
               <div className="flex flex-col gap-space-1">
                 <span className="text-tertiary">Agent replied:</span>
                 <div className="max-h-96 overflow-y-auto border-l-2 border-secondary pl-3 text-primary">

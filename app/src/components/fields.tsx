@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { Button } from '@langchain/macaw-components/Button';
 import { Card } from '@langchain/macaw-components/Card';
 import { Text } from '@langchain/macaw-components/Text';
@@ -34,7 +34,7 @@ export function TextAreaField({ label, value, onChange, rows = 2, mono = false, 
   maxRows?: number;
 }) {
   const ref = useRef<HTMLTextAreaElement>(null);
-  useLayoutEffect(() => {
+  const fit = () => {
     const el = ref.current;
     if (!el || !maxRows) return;
     const style = getComputedStyle(el);
@@ -44,7 +44,19 @@ export function TextAreaField({ label, value, onChange, rows = 2, mono = false, 
     const cap = line * maxRows + chrome;
     el.style.height = `${Math.min(el.scrollHeight + parseFloat(style.borderTopWidth) + parseFloat(style.borderBottomWidth), cap)}px`;
     el.style.overflowY = el.scrollHeight + chrome > cap ? 'auto' : 'hidden';
-  }, [value, maxRows]);
+  };
+  useLayoutEffect(fit, [value, maxRows]);
+  // The text wraps differently once the box gets its final width (it can mount narrow), so refit when the width changes.
+  useEffect(() => {
+    const el = ref.current;
+    if (!el || !maxRows) return;
+    let width = el.clientWidth;
+    const observer = new ResizeObserver(() => {
+      if (el.clientWidth !== width) { width = el.clientWidth; fit(); }
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [maxRows]);
   const area = (
     <textarea ref={ref} className={`${fieldClass} ${mono ? 'font-mono text-xs leading-5' : ''} ${maxRows ? 'resize-none' : ''}`} value={value} rows={rows}
       placeholder={placeholder} spellCheck={!mono} aria-label={label ?? placeholder} onChange={(event) => onChange(event.currentTarget.value)} />
@@ -52,20 +64,24 @@ export function TextAreaField({ label, value, onChange, rows = 2, mono = false, 
   return label ? <label className={labelClass}>{label}{area}</label> : area;
 }
 
-export // Titled sections collapse from their header; while closed they show `summary`. The open state lives in the
+// Titled sections collapse from their header; while closed they show `summary`. The open state lives in the
 // section, so it carries over when you switch tests.
-function Section({ title, hint, summary, children }: { title?: string; hint?: ReactNode; summary?: string; children: ReactNode }) {
-  const [open, setOpen] = useState(true);
+// Bumping `openSignal` opens a closed section (e.g. after something was added to it from elsewhere).
+export function Section({ title, hint, summary, defaultOpen = true, openSignal = 0, children }: {
+  title?: string; hint?: ReactNode; summary?: string; defaultOpen?: boolean; openSignal?: number; children: ReactNode;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  useEffect(() => { if (openSignal) setOpen(true); }, [openSignal]);
   if (!title) {
     return <Card intent="neutral" className="flex flex-col gap-space-4 border border-default">{children}</Card>;
   }
   return (
-    <Card intent="neutral" className="flex flex-col gap-space-4 border border-default">
+    <Card intent="neutral" className="flex flex-col gap-space-3 border border-default">
       <button type="button" className="flex items-start gap-space-2 text-left" aria-expanded={open} onClick={() => setOpen(!open)}>
         <span className={`mt-space-1 text-xs text-tertiary transition-transform ${open ? 'rotate-90' : ''}`}>▶</span>
         <span className="flex min-w-0 flex-col">
           <Text variant="h3">{title}</Text>
-          {open ? (hint ? <Text variant="xs" color="tertiary">{hint}</Text> : null) : summary ? <Text variant="xs" color="tertiary">{summary}</Text> : null}
+          {open ? (hint ? <Text variant="xs" color="tertiary">{hint}</Text> : null) : summary ? <span className="truncate text-xs text-tertiary">{summary}</span> : null}
         </span>
       </button>
       {open ? children : null}
@@ -73,7 +89,7 @@ function Section({ title, hint, summary, children }: { title?: string; hint?: Re
   );
 }
 
-export function Subsection({ title, hint, onAdd, addLabel, children }: { title: string; hint?: string; onAdd: () => void; addLabel: string; children: ReactNode }) {
+export function Subsection({ title, hint, onAdd, addLabel, children }: { title: string; hint?: ReactNode; onAdd?: () => void; addLabel?: string; children: ReactNode }) {
   return (
     <div className="flex flex-col gap-space-2">
       <div className="flex items-end justify-between gap-space-3">
@@ -81,7 +97,7 @@ export function Subsection({ title, hint, onAdd, addLabel, children }: { title: 
           <Text variant="sm" weight="semibold">{title}</Text>
           {hint ? <Text variant="xs" color="tertiary">{hint}</Text> : null}
         </div>
-        <Button size="sm" variant="outlined" color="secondary" onClick={onAdd}>{addLabel}</Button>
+        {onAdd && addLabel ? <Button size="sm" variant="outlined" color="secondary" onClick={onAdd}>{addLabel}</Button> : null}
       </div>
       {children}
     </div>

@@ -1,14 +1,16 @@
 import { useEffect, useState } from 'react';
 import { Button } from '@langchain/macaw-components/Button';
 import { Spinner } from '@langchain/macaw-components/Spinner';
-import { errorMessage, fetchLabels, fetchReasons, fetchResults, mockGaps, openTrace, saveLabel, shortDate, type Label, type MockGap, type TestResult } from '../lib/data';
+import { errorMessage, fetchLabels, fetchReasons, fetchResults, friendlyError, mockGaps, openTrace, saveLabel, shortDate, type Label, type MockGap, type TestResult } from '../lib/data';
+import { ErrorDetails } from './ErrorDetails';
 import { isWeb, requestRegrade, requestRewrites, type Regrade } from '../runs';
 import { Markdown } from './Markdown';
 import { clip, ToolCalls } from './ToolCalls';
 
 // One assertion's (or code check's) grades on the test's newest run, each beside what the agent actually did, so
-// "was the agent wrong, or the grade?" can be answered by reading. For an assertion, Re-grade grades the SAME saved
-// transcripts again with every judge the hook offers and says which of agent, judge or assertion is the cause.
+// "was the agent wrong, or the grade?" can be answered by reading. When the repetitions disagree, "Why is this
+// inconsistent?" (Re-grade, web mode) grades the SAME saved transcripts again with every judge the hook offers and
+// says which of agent, judge or assertion is the cause.
 
 const REWRITABLE: Regrade['cause'][] = ['assertion_ambiguous', 'judge_unreliable'];
 
@@ -85,12 +87,14 @@ export function AssertionDrilldown({ datasetId, exampleId, testName, name, kind,
     }
   };
 
+  // Mixed: some repetitions passed and some failed. Only then is there anything for Re-grade to explain.
+  const scores = (runs ?? []).filter((run) => !run.error).map((run) => run.assertions.find((a) => a.key === name)?.score).filter((v): v is number => typeof v === 'number');
+  const mixed = scores.some((v) => v >= 1) && scores.some((v) => v < 1);
+
   return (
     <div className="flex flex-col gap-space-2 rounded-md border border-default bg-surface-level-2 p-space-3 text-xs">
       <div className="flex items-center justify-between gap-space-2">
-        <span className="font-medium text-primary">
-          <span className="font-mono">{name}</span> on the newest run{runs?.[0] ? ` (${shortDate(runs[0].start)})` : ''}
-        </span>
+        <span className="font-medium text-primary">Newest run{runs?.[0] ? ` · ${shortDate(runs[0].start)}` : ''}</span>
         <button type="button" className="text-tertiary hover:text-primary" aria-label="Close" onClick={onClose}>✕</button>
       </div>
 
@@ -104,22 +108,14 @@ export function AssertionDrilldown({ datasetId, exampleId, testName, name, kind,
           <div key={run.runId} className="flex flex-col gap-space-1 rounded-sm border border-default bg-surface-level-1 p-space-2">
             <div className="flex items-center gap-space-2">
               <span className="text-secondary">Repetition {index + 1}</span>
-              {run.error ? <span className="text-error-primary">errored</span> : grade ? (
+              {run.error ? <span className="text-error-primary">✗ {friendlyError(run.error)}</span> : grade ? (
                 <span className={passed ? 'text-success-primary' : 'text-error-primary'}>{passed ? '✓ passed' : grade.score === null ? '? undecided' : '✗ failed'}</span>
               ) : <span className="text-tertiary">not graded</span>}
-              <button type="button" className="ml-auto text-xs text-brand-primary underline-offset-2 hover:underline"
-                onClick={() => void openTrace(run).catch(() => undefined)}>Trace</button>
             </div>
             {reasons[run.runId] || grade?.comment ? (
               <span className="text-secondary"><span className="text-tertiary">Judge: </span>{reasons[run.runId] || grade?.comment}</span>
             ) : null}
-            {run.error ? <span className="text-error-primary">{run.error}</span> : null}
-            {run.answer ? (
-              <div className="text-primary">
-                <div className="text-tertiary">Agent replied:</div>
-                <div className="border-l-2 border-secondary pl-3"><Markdown source={run.answer} /></div>
-              </div>
-            ) : null}
+            {run.answer ? <div className="border-l-2 border-secondary pl-3 text-primary"><Markdown source={run.answer} /></div> : null}
             {kind === 'assertion' && grade && grade.score !== null && !run.error && !mockGaps(run).length ? (
               <JudgeLabel judgedPass={grade.score === 1} label={labels[run.runId]}
                 onLabel={async (judgeRight, reason) => {
@@ -129,31 +125,36 @@ export function AssertionDrilldown({ datasetId, exampleId, testName, name, kind,
                   setLabels((current) => ({ ...current, [run.runId]: saved }));
                 }} />
             ) : null}
-            <ToolCalls calls={run.toolCalls} />
+            <ErrorDetails error={run.error} traceback={run.traceback} />
+            <span className="flex items-center gap-space-2">
+              <ToolCalls calls={run.toolCalls} />
+              <button type="button" className="ml-auto self-start text-tertiary underline-offset-2 hover:text-primary hover:underline"
+                onClick={() => void openTrace(run).catch(() => undefined)}>Trace</button>
+            </span>
           </div>
         );
       })}
 
-      {kind === 'check' ? (
-        <span className="text-tertiary">
-          Code checks are deterministic: the same tool calls always grade the same. A mixed result means the agent made different calls across repetitions.
-        </span>
-      ) : isWeb() ? (
+      {mixed && kind === 'check' ? (
+        <span className="text-tertiary">A code check grades the same calls the same way, so the agent called its tools differently across repetitions.</span>
+      ) : null}
+      {mixed && kind === 'assertion' && isWeb() ? (
         <div className="flex flex-col gap-space-2">
           <div className="flex items-center gap-space-2">
-            <Button size="sm" variant="outlined" color="secondary" onClick={() => void runRegrade()} disabled={regrading || !runs?.length}>
-              {regrading ? 'Re-grading…' : 'Re-grade: is it the agent, the judge or the assertion?'}
+            <Button size="sm" variant="outlined" color="secondary" onClick={() => void runRegrade()} disabled={regrading || !runs?.length}
+              title="Grades these same replies again, 3 times with each judge, and says whether the agent, the judge or the wording varies. Doesn't run the agent.">
+              {regrading ? 'Checking…' : 'Why is this inconsistent?'}
             </Button>
             {regrading ? <Spinner size="sm" /> : null}
           </div>
-          <span className="text-tertiary">Grades these same replies again, 3 times with each judge. Does not run the agent; costs only the judges.</span>
           {regradeError ? <span className="text-error-primary">{regradeError}</span> : null}
           {regrade ? <RegradeResult result={regrade} /> : null}
           {regrade && REWRITABLE.includes(regrade.cause) ? (
-            <div className="flex flex-col gap-space-1 rounded-sm border border-default bg-surface-level-1 p-space-2">
+            <div className="flex flex-col gap-space-1 rounded-sm border border-default bg-surface-level-1 p-space-2"
+              title={'Built from your "judge was wrong" reasons and the judges\' reasons. The name stays, so its results stay together.'}>
               <span className="font-medium text-primary">Try a clearer wording</span>
-              {rewriteState === 'loading' ? <span className="flex items-center gap-space-1 text-tertiary"><Spinner size="sm" />Drafting from the reasons above…</span> : null}
-              {rewriteState === 'applied' ? <span className="text-success-primary">Applied to the test. Run it again to see whether the grades now agree.</span> : null}
+              {rewriteState === 'loading' ? <span className="flex items-center gap-space-1 text-tertiary"><Spinner size="sm" />Drafting…</span> : null}
+              {rewriteState === 'applied' ? <span className="text-success-primary">Applied. Run it again to see whether the grades now agree.</span> : null}
               {rewriteState !== 'idle' && rewriteState !== 'loading' && rewriteState !== 'applied' ? <span className="text-error-primary">{rewriteState}</span> : null}
               {rewrites?.length === 0 ? <span className="text-tertiary">No rewrite came back.</span> : null}
               {rewriteState !== 'applied' ? rewrites?.map((rewrite) => (
@@ -165,13 +166,10 @@ export function AssertionDrilldown({ datasetId, exampleId, testName, name, kind,
                   ) : null}
                 </span>
               )) : null}
-              <span className="text-tertiary">Built from your "judge was wrong" reasons and the judges' reasons. The name stays, so its results stay together.</span>
             </div>
           ) : null}
         </div>
-      ) : (
-        <span className="text-tertiary">Re-grade needs the eval server (web mode).</span>
-      )}
+      ) : null}
     </div>
   );
 }
@@ -189,7 +187,7 @@ function JudgeLabel({ judgedPass, label, onLabel }: { judgedPass: boolean; label
     try { await onLabel(right, why); setReason(null); } catch (err) { setError(`Could not save the label: ${errorMessage(err)}`); } finally { setSaving(false); }
   };
   const button = (right: boolean, text: string) => (
-    <button type="button" disabled={saving} onClick={() => (right ? void save(true) : setReason(label?.comment ?? ''))}
+    <button type="button" disabled={saving} aria-label={right ? 'Judge was right' : 'Judge was wrong'} onClick={() => (right ? void save(true) : setReason(label?.comment ?? ''))}
       className={`rounded-sm border px-space-2 ${judgeRight === right ? 'border-focus bg-selected text-primary' : 'border-default text-secondary hover:text-primary'}`}>
       {text}
     </button>
@@ -197,7 +195,7 @@ function JudgeLabel({ judgedPass, label, onLabel }: { judgedPass: boolean; label
   return (
     <span className="flex flex-col gap-space-1 text-tertiary">
       <span className="flex items-center gap-space-1">
-        Judge right? {button(true, '✓ yes')} {button(false, '✗ no')}
+        Judge right? {button(true, '✓')} {button(false, '✗')}
         {label ? <span>labelled: should {label.correct ? 'pass' : 'fail'}{label.comment ? ` · “${label.comment}”` : ''}</span> : null}
       </span>
       {reason !== null ? (
@@ -222,27 +220,30 @@ function RegradeResult({ result }: { result: Regrade }) {
     <div className="flex flex-col gap-space-2 rounded-sm border border-default bg-surface-level-1 p-space-2">
       <span className={`text-sm font-semibold ${cause.tone}`}>{cause.label}</span>
       <span className="text-secondary">{result.advice}</span>
-      <table className="w-full text-left">
-        <thead className="text-tertiary">
-          <tr>
-            <th className="pr-space-2 font-normal">Rep</th>
-            <th className="pr-space-2 font-normal">Original</th>
-            {result.judges.map((judge) => <th key={judge} className="pr-space-2 font-normal">{judge} ×{result.times}</th>)}
-          </tr>
-        </thead>
-        <tbody className="font-mono">
-          {result.repetitions.map((rep) => (
-            <tr key={rep.number} className={result.disputed_repetitions.includes(rep.number) || result.overturned_repetitions.includes(rep.number) ? 'bg-warning-subtle' : ''}>
-              <td className="pr-space-2">{rep.number}</td>
-              <td className="pr-space-2">{mark(rep.original)}</td>
-              {result.judges.map((judge) => (
-                <td key={judge} className="pr-space-2" title={rep.reasons[judge]}>{(rep.regrades[judge] ?? []).map(mark).join(' ')}</td>
-              ))}
+      <details>
+        <summary className="cursor-pointer text-tertiary">Details</summary>
+        <table className="mt-space-1 w-full text-left">
+          <thead className="text-tertiary">
+            <tr>
+              <th className="pr-space-2 font-normal">Rep</th>
+              <th className="pr-space-2 font-normal">Original</th>
+              {result.judges.map((judge) => <th key={judge} className="pr-space-2 font-normal">{judge} ×{result.times}</th>)}
             </tr>
-          ))}
-        </tbody>
-      </table>
-      <span className="text-tertiary">Hover a judge's grades for its reason on that repetition.</span>
+          </thead>
+          <tbody className="font-mono">
+            {result.repetitions.map((rep) => (
+              <tr key={rep.number} className={result.disputed_repetitions.includes(rep.number) || result.overturned_repetitions.includes(rep.number) ? 'bg-warning-subtle' : ''}>
+                <td className="pr-space-2">{rep.number}</td>
+                <td className="pr-space-2">{mark(rep.original)}</td>
+                {result.judges.map((judge) => (
+                  <td key={judge} className="pr-space-2" title={rep.reasons[judge]}>{(rep.regrades[judge] ?? []).map(mark).join(' ')}</td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <span className="text-tertiary">Hover a judge's grades for its reason on that repetition.</span>
+      </details>
     </div>
   );
 }
@@ -258,16 +259,13 @@ function GapBanner({ gaps, onAddMock }: { gaps: MockGap[]; onAddMock?: (gap: Moc
   if (!gaps.length) return null;
   return (
     <div className="flex flex-col gap-space-1 rounded-sm border border-warning bg-warning-subtle p-space-2">
-      <span className="text-sm font-semibold text-primary">This run hit a gap in the test, not a problem with the agent</span>
-      <span className="text-secondary">
-        The agent called a tool the test has no mock for, so it got an error back. Its grades below don't say anything about the agent. Add the missing mock, then run again.
-      </span>
+      <span className="font-semibold text-primary">A tool had no answer, so this result doesn't count.</span>
       {gaps.map((gap, index) => (
         <span key={index} className="flex flex-wrap items-center gap-space-2">
           <span className="font-mono text-primary">{gap.tool}({clip(Object.entries(gap.args).map(([k, v]) => `${k}=${typeof v === 'string' ? v : JSON.stringify(v)}`).join(', '), 120)})</span>
           {onAddMock ? (
             <button type="button" className="rounded-sm border border-default bg-surface-level-1 px-space-2 text-primary hover:border-focus" onClick={() => onAddMock(gap)}>
-              Add this mock
+              Add answer
             </button>
           ) : null}
         </span>

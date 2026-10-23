@@ -1,24 +1,24 @@
 # Eval editor
 
-A test editor for LangChain agents, backed by a LangSmith dataset. Tests read like unit tests: **Given** a world, **When** the agent gets a message, **Assert** what must be true of what it did.
+A test editor for LangChain agents, backed by a LangSmith dataset. Tests read like unit tests: **Given** a world, **When** the agent gets a message, **Then** what must be true of what it did.
 
 - **Given** is everything that is true before the message arrives:
   - **Context**: an opaque JSON object your hook uses to set the agent up (business record, a frozen clock, feature flags…).
   - **History**: earlier turns of the conversation.
   - **Mock tools**: every tool the agent may call, with what it returns. A mock can return one response, a different response per argument value, a different response per call, or a failure (`{"raise": "503 ..."}`).
 - **When** is the new message sent to the agent.
-- **Assert** comes in two kinds:
+- **Then** comes in two kinds:
   - **Assertions**: named one-sentence statements ("It never says or implies that the refund was issued."), graded by an LLM judge against the run.
   - **Code checks**: deterministic checks a judge can't grade from a transcript, such as `must_call`, `max_tool_calls` or `max_prompt_tokens`.
 
-**Run test** runs the real agent against the mocks several times in parallel and logs one LangSmith experiment. **Run all** and **Run failing** run many tests, 8 at a time. The test list works like an IDE's test explorer:
+**Run** runs the real agent against the mocks several times in parallel and logs one LangSmith experiment. **Run all** and **Run failing** run many tests, 8 at a time. The test list works like an IDE's test explorer:
 
 - **Each test has a status dot** for its newest result: green (passed every repetition), amber (passed some), red (failed every repetition) or a red **!** (the run errored, e.g. an incomplete test).
 - **Each assertion and code check shows its last result** inline (`3/3`, `1/3`, `0/3`).
-- **The test header shows the last run**: when, how it went, total and per-run cost, median time, and the agent commit.
+- **The test's top bar shows the last run** in a few words ("Passed 3/3 · Oct 16"); its tooltip has the cost, median time and agent commit, and clicking it opens Results.
 - **Out-of-date results are marked.** If the test was edited after its last run, or the agent's code changed, the results are flagged instead of passed off as current.
 
-![The editor: proposals and tests on the left; one test's context, files, history and mocks in the middle.](docs/screenshot.png)
+![The editor: tests on the left; one test's Given, When and Then in the middle.](docs/simplify/after-01-test-top.jpg)
 
 The UI runs either as a normal web app served by the eval server (**standalone**, the default) or inside LangSmith as a **custom app**. Both use the same `App.tsx`.
 
@@ -33,7 +33,7 @@ server/
   evidence.py     what a grader sees of a run, fitted under a size limit without cutting it off
   regrade.py      Re-grade: one assertion over saved transcripts, several times, with every judge
   diagnose.py     reads those grades: agent varied, judge unreliable, assertion ambiguous, or grade overturned
-  drafting.py     assertion drafts from the judge model: suggestions for a proposal, rewrites of an ambiguous one
+  drafting.py     assertion drafts from the judge model: suggestions for a test imported from a trace, rewrites of an ambiguous one
   harness.py      runs tests via langsmith.evaluate: repetitions, judge, code checks
   suite.py        the pytest-like layer: selection, markers, verdicts, summary, JUnit
   cli.py          runs tests from the command line, like pytest
@@ -61,11 +61,11 @@ cd app && npm install && npm run build:web
 cd server && uv run uvicorn main:app --port 8765
 ```
 
-Open http://localhost:8765. On first start the server creates the `eval-editor-demo` dataset with four tests. Pick one and click **Run test**.
+Open http://localhost:8765. On first start the server creates the `eval-editor-demo` dataset with four tests. Pick one and click **Run**.
 
 For UI work, `npm run dev:web` in `app/` serves the editor with hot reload on http://localhost:5173 and proxies `/api` to the server.
 
-To populate **Import** (turn a real run into a proposal; see [Proposals](#proposals-from-trace-to-test)), run the agent a few times; its traces go to the `eval-editor-demo-agent` project:
+To populate **Import** (turn a real run into a test; see [From trace to test](#from-trace-to-test)), run the agent a few times; its traces go to the `eval-editor-demo-agent` project:
 
 ```bash
 cd server && uv run python demo_agent.py "Where is my order A1002?"
@@ -220,13 +220,13 @@ Then set the names in `server/.env` and `app/.env` (copy each `.env.example`): `
 
 ## Working in the editor
 
-- **Run test / Run all / Run failing.** "Failing" means every test whose newest result is red, amber or errored. Run all and Run failing confirm first, showing the run count and an **estimated cost**: each test's LangSmith-priced cost per repetition on its newest run, times the repetitions chosen. The estimate covers the agent's model calls only (graders trace elsewhere), and tests with no priced run yet are counted separately rather than guessed.
+- **Run / Run all / Run failing** (Run failing is in the ⋯ beside Run all). "Failing" means every test whose newest result is red, amber or errored. Run all and Run failing confirm first, showing the run count and an **estimated cost**: each test's LangSmith-priced cost per repetition on its newest run, times the repetitions chosen. The estimate covers the agent's model calls only (graders trace elsewhere), and tests with no priced run yet are counted separately rather than guessed.
 - **8 tests run at a time** (`EVAL_PARALLEL=N` on the server or CLI, or the CLI's `--parallel N`, changes it). Every agent run lives in one process, so "all at once" can exhaust the machine's memory: 81 tests × 3 repetitions of a large agent froze a 32 GB Mac. The server queues the rest, and the list shows each test as queued or running until its result lands.
 - **Status dots** come from the dataset's experiment list, newest first, read only until every test has a status. That's usually one request, however many experiments the dataset has run. They refresh every 30 s, and right away when a run finishes.
-- **Results** lists every run of the selected test, newest first, with each assertion's and check's score and reason per repetition.
-- **Compare two runs.** Tick two repetitions in Results, of one experiment or of two, and click **Compare**: their grades, replies and tool calls side by side, with what differs said first (which grades differ; whether the tool calls, their arguments or their results differ).
+- **Results** lists every run of the selected test, newest first: how many assertions passed every time, and each repetition's ✓/✗ and answer. A run that errored says why in one line ("Couldn't reach the model (API key rejected)"); the raw error and traceback are under **Details**. The trace and the LangSmith experiment are in each ⋯.
+- **Compare two runs.** Pick **Compare…** in a repetition's ⋯, then **Compare** on another (of the same run or another): their grades, replies and tool calls side by side, with what differs said first (which grades differ; whether the tool calls, their arguments or their results differ).
 - **Assertion hints.** Under an assertion, a quiet hint flags wordings judges grade inconsistently: two claims joined by "and", vague words ("appropriate", "good", "properly"), or nothing a transcript would show. They're advice; nothing blocks saving.
-- **Why did it fail?** Click an assertion's or check's result chip. Each repetition of the newest run shows the judge's verdict and reason **beside the agent's reply and tool calls**. Then click **Re-grade**. It grades those same saved replies again, 3 times with each judge the hook offers, without re-running the agent (judges' cost only), and names the cause:
+- **Why did it fail?** Click an assertion's or check's result chip. Each repetition of the newest run shows the judge's verdict and reason **beside the agent's reply and tool calls**. When the repetitions disagree, click **Why is this inconsistent?** (Re-grade). It grades those same saved replies again, 3 times with each judge the hook offers, without re-running the agent (judges' cost only), and names the cause:
 
   | Diagnosis | What it means | What to fix |
   |---|---|---|
@@ -235,33 +235,31 @@ Then set the names in `server/.env` and `app/.env` (copy each `.env.example`): `
   | **The assertion is ambiguous** | Each judge is consistent, but they read the reply differently | The assertion's wording |
   | **The original grade was wrong** | Every fresh grade agrees and contradicts the original: grading at run time was broken or has changed | Nothing: re-run |
 
-  Code checks are deterministic, so a mixed code-check result always means the agent varied. Re-grade needs the web server.
+  Code checks are deterministic, so a mixed code-check result always means the agent varied. Re-grade needs the web server; the button only shows there.
 
   When the diagnosis is **ambiguous** or **unreliable**, Re-grade also drafts 1 or 2 rewrites of the assertion from the reasons the expert gave for "Judge right? no" and the judges' reasons on the disputed repetitions (`drafting.py`, the judge model). **Use this** puts one in the test; the name stays, so its results stay together.
-- **Out of date.** A result stops counting as current when the test was edited after the run, or when the agent's code changed since. "Edited" compares a content hash of the test's inputs and assertions with the one the run recorded, so a new description or tag doesn't count. "The agent's code changed" means a commit since the run touched `EVAL_AGENT_PATHS` (space-separated git pathspecs; default the whole checkout), so a commit that only changes evals or docs leaves results current. Out-of-date dots and chips fade, and the header strikes the last run through with the reason and a **Run it again** link.
+- **Out of date.** A result stops counting as current when the test was edited after the run, or when the agent's code changed since. "Edited" compares a content hash of the test's inputs and assertions with the one the run recorded, so a new description or tag doesn't count. "The agent's code changed" means a commit since the run touched `EVAL_AGENT_PATHS` (space-separated git pathspecs; default the whole checkout), so a commit that only changes evals or docs leaves results current. Out-of-date dots and chips fade, and the top bar says **Out of date · Run again**.
 - **Agent replies render as markdown** in the drill-down, the way a chat UI shows them.
 - **Judge right? yes / no.** Each graded repetition in the drill-down takes a label: was the judge's verdict right? It's saved as `human-label` feedback on the run (score = the right verdict, value = the assertion's name, comment = the reason). **No** asks for a short reason first; Re-grade's rewrites are built from those reasons. Labels are what the judge bench measures judges against.
 
-## Proposals: from trace to test
+## From trace to test
 
-A proposal is a test that isn't part of the eval set yet. It's where a subject-matter expert shapes a real trace into a test: they write the assertions, fill in missing mocks, run it, and sharpen whatever the judge grades inconsistently. Once the grades hold, they accept it.
+A flagged trace becomes a test in one click. The subject-matter expert then writes the assertions, fills in missing tool answers, runs it, and sharpens whatever the judge grades inconsistently.
 
 ```
-flagged trace ──run rule──► annotation queue ──open──► proposal (dataset example, status: proposal)
-                                                          │ add assertions · Run · refine
-                                                          ▼
-                                       Accept ──► test (status: active), run removed from the queue
+flagged trace ──run rule──► annotation queue ──Import──► test (dataset example), run removed from the queue
 ```
 
-- **The inbox** is an annotation queue, `eval-editor-demo-proposals` (`PROPOSALS_QUEUE` / `VITE_PROPOSALS_QUEUE`). The server creates it on start. The editor lists its runs at the top of the rail, under **Proposals**, marked *flagged*.
+- **Flagged traces** live in an annotation queue, `eval-editor-demo-proposals` (`PROPOSALS_QUEUE` / `VITE_PROPOSALS_QUEUE`). The server creates it on start. The editor lists them at the top of **Import** (the count shows beside it); the **×** on one dismisses it.
 - **Flagged traces get there by a run rule.** `uv run python proposals.py --rule` creates one on the agent's tracing project: every root run that gets `user_score = 0` feedback goes to the queue. Edit `FLAGGED_FILTER` in `server/proposals.py` to match the feedback your app writes. `proposals.py --add <run-id>` queues a run by hand.
-- **Clicking a flagged trace previews it**: the message, the agent's reply, its tool calls and the flag's comment. Nothing is written until **Make proposal**, which imports it as a proposal:
-  - The root run's last user message becomes the prompt (When), and every message before it becomes **History**, including the agent's earlier tool calls and their results. The agent is replayed into the same situation it was in.
-  - Each tool called during this turn becomes a mock. A tool called once returns that response for any arguments. A tool called several times with different arguments gets one case per argument set.
-  - **Import** (paste a trace link, or pick a recent run) previews and makes a proposal the same way, without the queue.
-- **Suggest assertions** (web mode) drafts 2 to 4 one-sentence assertions from the message, the original reply and the flag's comment (`drafting.py`, the judge model). They go in as ordinary assertions, for the expert to edit or delete.
-- **A proposal is a dataset example** with `metadata.status = "proposal"` (and `source_run_id`, `source_trace_id`). It runs exactly like a test, and its results stay with it after Accept. Run all, Run failing and `cli.py` leave proposals out; `cli.py --proposals` includes them, and naming one runs it.
-- **Accept into eval set** sets the status to `active` and takes the run out of the queue. **Delete proposal** deletes the example and takes the run out of the queue too, so it isn't proposed again. The **×** on a flagged trace dismisses it without importing it.
+- **Clicking one makes the test** and opens it (recent runs below it, and a pasted trace link under **More**, work the same way):
+  - It's named from the message (`where-is-my-order-a1002`) and described by the flag's comment, if any.
+  - The root run's last user message becomes the prompt (When), and every message before it becomes earlier messages, including the agent's earlier tool calls and their results. The agent is replayed into the same situation it was in.
+  - Each tool called during this turn becomes a tool answer. A tool called once returns that response for any arguments. A tool called several times with different arguments gets one case per argument set.
+  - The original reply and the flag's feedback are kept (`metadata.source_output`, `source_feedback`) and shown under **What the agent said**.
+- **Suggest** (web mode) drafts 2 to 4 one-sentence assertions from the message, the original reply and the flag's comment (`drafting.py`, the judge model). They go in as ordinary assertions, for the expert to edit or delete.
+- The test remembers its trace (`source_trace_id`, `source_run_id`); the run leaves the queue once the test is saved, or when it's deleted.
+- Examples made by older versions of the editor may carry `metadata.status = "proposal"`: `cli.py` skips those unless named (`cli.py --proposals` includes them). The editor lists them as ordinary tests and clears the mark the next time one is saved. `metadata.xfail` (known bug) is still honoured by the CLI, but the editor no longer sets or shows it.
 
 ## Pick a judge: the bench
 
@@ -283,10 +281,10 @@ It recommends the **fastest judge within 1 point of the best accuracy that is at
 
 ## Turn it into a LangSmith custom app
 
-Inside LangSmith the editor runs in a sandboxed iframe: it can call the LangSmith API (through `window.langsmith.call`, under the viewer's own session) and nothing else. Everything except **Run test** already works there, because the web build only reaches LangSmith through a shim with the same `window.langsmith` shape. Run test can't call your server, so it commits the request to a Context Hub prompt repo, and a prompt webhook on that repo wakes the server:
+Inside LangSmith the editor runs in a sandboxed iframe: it can call the LangSmith API (through `window.langsmith.call`, under the viewer's own session) and nothing else. Everything except **Run** already works there, because the web build only reaches LangSmith through a shim with the same `window.langsmith` shape. Run can't call your server, so it commits the request to a Context Hub prompt repo, and a prompt webhook on that repo wakes the server:
 
 ```
-Run test ──commit──► prompt repo eval-editor-run-requests ──webhook──► server /hooks/eval-runs
+Run ──commit──► prompt repo eval-editor-run-requests ──webhook──► server /hooks/eval-runs
                                                                          │ reads the repo, runs new requests
 Results column ◄──── polls experiments on the dataset ◄────────────────── harness.run_tests
 ```
@@ -320,7 +318,7 @@ Each commit's template holds one request as `key: value` lines (`test`, `example
 
    The first push writes `app/.langsmith/app.json` with the app's ID; commit it so later pushes update the same app. Pushing publishes to everyone in the workspace.
 
-4. **Keep the server running.** Open the app in LangSmith, click **Run test**: the Results column shows "Requested" until the server picks it up, then each repetition as it's graded.
+4. **Keep the server running.** Open the app in LangSmith, click **Run**: the Results column shows "Waiting to run" until the server picks it up, then each repetition as it's graded.
 
 Custom-app constraints:
 

@@ -1,11 +1,14 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { DotsThreeIcon } from '@phosphor-icons/react/dist/csr/DotsThree';
 
-// The test's "⋯" menu. Hand-rolled on purpose: Macaw's DropdownMenu cost ~90 KB of a custom-app bundle that
-// LangSmith caps at 1 MB, for a menu with two items. Closes on Escape, on a click outside, or after an item.
+// The "⋯" menus (and Given's "Add ▾"). Hand-rolled on purpose: Macaw's DropdownMenu cost ~90 KB of a custom-app
+// bundle that LangSmith caps at 1 MB, for menus of a few items. Closes on Escape, on a click outside, or after an item.
+// `trigger` replaces the dots with a labelled button.
 export type MenuItem = { label: string; onSelect: () => void; danger?: boolean; disabled?: boolean };
 
-export function ActionsMenu({ label, items, compact = false }: { label: string; items: MenuItem[]; compact?: boolean }) {
+export function ActionsMenu({ label, items, compact = false, trigger, align = 'right' }: {
+  label: string; items: MenuItem[]; compact?: boolean; trigger?: ReactNode; align?: 'left' | 'right';
+}) {
   const [open, setOpen] = useState(false);
   const root = useRef<HTMLDivElement>(null);
 
@@ -28,13 +31,15 @@ export function ActionsMenu({ label, items, compact = false }: { label: string; 
   return (
     <div ref={root} className="relative">
       <button type="button" aria-label={label} aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen(!open)}
-        className={compact
+        className={trigger
+          ? 'inline-flex h-8 items-center gap-space-1 rounded-md border border-default px-space-3 text-sm text-secondary hover:bg-surface-level-2 hover:text-primary'
+          : compact
           ? 'mr-space-2 inline-flex size-7 items-center justify-center rounded-md text-tertiary hover:bg-surface-level-3 hover:text-primary'
           : 'inline-flex size-8 items-center justify-center rounded-md border border-default text-secondary hover:bg-surface-level-2 hover:text-primary'}>
-        <DotsThreeIcon size={18} weight="bold" />
+        {trigger ?? <DotsThreeIcon size={18} weight="bold" />}
       </button>
       {open ? (
-        <div role="menu" className="absolute right-0 z-10 mt-space-1 flex min-w-36 flex-col rounded-md border border-default bg-surface-level-1 p-space-1 shadow-md">
+        <div role="menu" className={`absolute ${align === 'left' ? 'left-0' : 'right-0'} z-20 mt-space-1 flex min-w-36 flex-col rounded-md border border-default bg-surface-level-1 p-space-1 shadow-md`}>
           {items.map((item) => (
             <button key={item.label} type="button" role="menuitem" disabled={item.disabled}
               className={`rounded-sm px-space-2 py-space-1 text-left text-sm hover:bg-surface-level-2 disabled:opacity-50 ${item.danger ? 'text-error-primary' : 'text-primary'}`}
